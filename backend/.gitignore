@@ -1,0 +1,15 @@
+.envrc
+
+site
+dist
+build
+zensical.toml
+docs/api/
+
+*.egg-info
+**/__pycache__
+
+.DS_Store
+
+data/offline/
+data/online/

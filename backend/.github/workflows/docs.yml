@@ -1,0 +1,40 @@
+name: Deploy docs
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - "docs/**"
+      - "_zensical.toml"
+      - "openg2g/**"
+      - "scripts/gen_api_docs.py"
+      - "scripts/docs.sh"
+      - "uv.lock"
+      - ".github/workflows/docs.yml"
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+jobs:
+  deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/configure-pages@v5
+      - uses: actions/checkout@v6
+      - uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+      - run: uv sync --only-group docs
+      - run: uv run --no-sync bash scripts/docs.sh build
+        env:
+          ZENSICAL_ENABLE_ANALYTICS: "1"
+      - uses: actions/upload-pages-artifact@v4
+        with:
+          path: site
+      - uses: actions/deploy-pages@v4
+        id: deployment

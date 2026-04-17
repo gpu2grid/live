@@ -1,0 +1,19 @@
+10:18:01 run_baseline INFO Initializing OfflineDatacenter...
+10:18:01 openg2g.datacenter.offline INFO OfflineDatacenter: 5 models, dt=1/10 s, seed=0
+10:18:01 openg2g.datacenter.offline INFO   Llama-3.1-8B: 720 replicas, 1 GPUs/replica, batch=128
+10:18:01 openg2g.datacenter.offline INFO   Llama-3.1-70B: 180 replicas, 4 GPUs/replica, batch=128
+10:18:01 openg2g.datacenter.offline INFO   Llama-3.1-405B: 90 replicas, 8 GPUs/replica, batch=128
+10:18:01 openg2g.datacenter.offline INFO   Qwen3-30B-A3B: 480 replicas, 2 GPUs/replica, batch=128
+10:18:01 openg2g.datacenter.offline INFO   Qwen3-235B-A22B: 210 replicas, 8 GPUs/replica, batch=128
+10:18:01 run_baseline INFO Initializing OpenDSSGrid...
+10:18:01 run_baseline INFO Running simulation (mode=no-tap)...
+10:18:01 openg2g.coordinator INFO Coordinator will run with tick 0.100000 s
+10:18:01 openg2g.grid.opendss INFO OpenDSSGrid: case=IEEE13Nodeckt.dss, dc_bus=671, dt=1/10 s, dss_controls=False, 16 buses, 38 bus-phase pairs
+10:18:01 openg2g.coordinator INFO Starting simulation: 3600 s, tick=1/10 s, 36000 ticks, dt_dc=1/10 s, dt_grid=1/10 s, 1 controller(s)
+10:18:06 openg2g.coordinator INFO Simulation complete: 36000 grid steps, 36000 DC steps, 0 commands
+10:18:06 run_baseline INFO === Voltage Statistics (all-bus) ===
+10:18:06 run_baseline INFO   voltage_violation_time = 1007.0 s
+10:18:06 run_baseline INFO   worst_vmin             = 0.935359
+10:18:06 run_baseline INFO   worst_vmax             = 1.050525
+10:18:06 run_baseline INFO   integral_violation     = 30.3320 pu·s
+10:18:08 run_baseline INFO Outputs saved to: /Users/saniyakalamkar/research/13_bus_system/openg2g/outputs/baseline_no-tap
