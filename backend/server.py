@@ -269,6 +269,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
+
 class PowerflowRequest(BaseModel):
     substationVoltage: float = 1.05
     numBuses:          int   = 13
@@ -295,6 +297,9 @@ def health():
     return {"status": "ok", "data_ready": _DATA_DIR.exists(),
             "message": "gpu2grid OpenDSS server"}
 
+@app.get("/health")
+def health():
+    return "OK"
 
 
 """Return available traces"""
