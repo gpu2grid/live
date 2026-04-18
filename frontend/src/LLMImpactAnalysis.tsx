@@ -534,10 +534,12 @@ export default function LLMImpactAnalysis({ onVoltagesUpdated, onLoadingChanged,
                   <div style={{ height: 100 }}>
                     <ResponsiveContainer width="100%" height="100%">
                       <LineChart data={bus.series} margin={{ top: 4, right: 4, bottom: 0, left: 0 }}
-                        onClick={e => { const idx = e?.activePayload?.[0]?.payload?._i; if (idx != null) { setIsPlaying(false); setSelIdx(idx); } }}
+                        onClick={(e: any) => { const idx = e?.activePayload?.[0]?.payload?._i; if (idx != null) { setIsPlaying(false); setSelIdx(idx); } }}
+
                         style={{ cursor: 'pointer' }}>
                         <XAxis dataKey="t" hide />
-                        <YAxis domain={([dataMin, dataMax]: [number, number]) => { const pad = (dataMax - dataMin) * 0.1 || 0.02; return [Math.min(dataMin - pad, 0.92), Math.max(dataMax + pad, 1.06)]; }} hide />
+                        <YAxis domain={([dataMin, dataMax]: any) => { const pad = (dataMax - dataMin) * 0.1 || 0.02; return [Math.min(dataMin - pad, 0.92), Math.max(dataMax + pad, 1.06)]; }} hide />
+                        
                         <Tooltip content={<MiniTooltip />} />
                         <ReferenceLine y={0.95} stroke="#ef4444" strokeDasharray="3 3" strokeWidth={1} />
                         <ReferenceLine y={1.05} stroke="#f59e0b" strokeDasharray="3 3" strokeWidth={1} />
