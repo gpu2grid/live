@@ -29,6 +29,7 @@ jobs:
             --exclude='*.pyc' \
             --exclude='openg2g.egg-info' \
             --exclude='outputs/' \
+            --exclude='docs/' \
             backend/ hf-space/
           cd hf-space
           git add -A
