@@ -9,31 +9,31 @@ const App = () => {
   const [heatmapLabel, setHeatmapLabel]         = useState<string>('Baseline (no LLM load)');
   const [baselineVoltages, setBaselineVoltages] = useState<number[] | null>(null);
   const [dataCenterBus, setDataCenterBus]       = useState<number | null>(null);
-
+ 
   useEffect(() => {
-    
-    wakeBackend();
-
-    // load heatmap baseline
-    const loadBaseline = async () => {
+    const init = async () => {
       setHeatmapLoading(true);
+      await wakeBackend();
       try {
         const res = await fetch(`${API_URL}/api/powerflow`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ numBuses: 13, baseVoltage: 4.16, substationVoltage: 1.05 }),
         });
-        if (!res.ok) return;
-        const data = await res.json();
-        const voltages = (data.buses || []).map((b: any) => b.voltage);
-        setBaselineVoltages(voltages);
-        setHeatmapVoltages(voltages);
-        setHeatmapLabel('Baseline (no LLM load)');
-      } catch { }
-      finally { setHeatmapLoading(false); }
+        if (res.ok) {
+          const data = await res.json();
+          const voltages = (data.buses || []).map((b: any) => b.voltage);
+          setBaselineVoltages(voltages);
+          setHeatmapVoltages(voltages);
+          setHeatmapLabel('Baseline (no LLM load)');
+        }
+      } catch {}
+      setHeatmapLoading(false);
     };
-    loadBaseline();
+    init();
   }, []);
+
+  
 
   const handleReset = () => {
     if (baselineVoltages) {
