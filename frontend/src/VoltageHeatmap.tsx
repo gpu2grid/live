@@ -28,8 +28,9 @@ export default function VoltageHeatmap({ voltages, loading = false, label, dataC
 
   const fetchHeatmap = async (v: number[], dcBus?: number | null) => {
     setFetching(true); setError(null);
-    try {
-      const res = await fetch("http://localhost:8080/api/heatmap", {
+      const HF_SPACE_URL = "https://huggingface.co/spaces/gpu2grid/live";
+    
+      const res = await fetch(`${HF_SPACE_URL}/api/heatmap`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ voltages: v, dataCenterBus: dcBus ?? null }),
