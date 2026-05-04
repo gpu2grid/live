@@ -188,10 +188,10 @@ export default function LLMImpactAnalysis({ onVoltagesUpdated, onLoadingChanged,
     setLoading(true); setError(null); setData(null);
     setSelIdx(0); setIsPlaying(false);
     onLoadingChanged?.(true);
+  
     try {
-      
-       const res = await fetch(`${API_URL}/api/llm-impact`, {
-
+      //submit job and get job id
+      const submitRes = await fetch(`${API_URL}/api/llm-impact`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -204,8 +204,30 @@ export default function LLMImpactAnalysis({ onVoltagesUpdated, onLoadingChanged,
           sampleInterval:    1,
         }),
       });
-      if (!res.ok) throw new Error(await res.text() || `HTTP ${res.status}`);
-      const result: AnalysisData = await res.json();
+      if (!submitRes.ok) throw new Error(await submitRes.text() || `HTTP ${submitRes.status}`);
+      const { job_id } = await submitRes.json();
+  
+      // poll 
+      const result: AnalysisData = await new Promise((resolve, reject) => {
+        const interval = setInterval(async () => {
+          try {
+            const pollRes = await fetch(`${API_URL}/api/job/${job_id}`);
+            const job = await pollRes.json();
+            if (job.status === 'done') {
+              clearInterval(interval);
+              resolve(job.result);
+            } else if (job.status === 'error') {
+              clearInterval(interval);
+              reject(new Error(job.detail));
+            }
+            // still 'pending' → keep polling
+          } catch (e) {
+            clearInterval(interval);
+            reject(e);
+          }
+        }, 2000);
+      });
+  
       setData(result);
       if (result?.timeSeries?.length) {
         const peakStep = result.timeSeries.reduce((a, b) => b.gpu_power_kW > a.gpu_power_kW ? b : a);
