@@ -1,113 +1,149 @@
 import { useState, useEffect, useRef } from "react";
+import { API_URL } from './api';
 
-interface VoltageHeatmapProps {
+const BUS_NAMES: Record<number, string> = {
+    1:'650', 2:'632', 3:'633', 4:'645', 5:'646', 6:'671',
+    7:'684', 8:'611', 9:'634', 10:'675', 11:'652', 12:'680', 13:'692',
+};
+
+interface Props {
   voltages: number[];
-  loading?: boolean;
-  label?: string;
-  dataCenterBus?: number | null;  
+  dataCenterBus?: number | null;
 }
 
-export default function VoltageHeatmap({ voltages, loading = false, label, dataCenterBus }: VoltageHeatmapProps) {
-  const [imgSrc, setImgSrc]     = useState<string | null>(null);
-  const [fetching, setFetching] = useState(false);
-  const [error, setError]       = useState<string | null>(null);
-  const debounceRef             = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const latestRef               = useRef({ voltages, dataCenterBus });
+export default function VoltageHeatmap({ voltages, dataCenterBus }: Props) {
+  const [selectedBus, setSelectedBus] = useState<number | null>(null);
+  const [hoveredBus, setHoveredBus] = useState<number | null>(null);
+  const [tooltipPos, setTooltipPos] = useState<{ x: number, y: number } | null>(null);
+  const [svgCode, setSvgCode] = useState<string>("");
+  const containerRef = useRef<HTMLDivElement>(null);
 
+  //ger svg
   useEffect(() => {
-    if (!voltages || voltages.length !== 13) return;
-    latestRef.current = { voltages, dataCenterBus };
-
-    if (debounceRef.current) clearTimeout(debounceRef.current);
-    debounceRef.current = setTimeout(() => {
-      fetchHeatmap(latestRef.current.voltages, latestRef.current.dataCenterBus);
-    }, 300);
-
-    return () => { if (debounceRef.current) clearTimeout(debounceRef.current); };
+    async function fetchSvg() {
+      try {
+        const res = await fetch(`${API_URL}/api/heatmap`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ voltages, dataCenterBus }),
+        });
+        const text = await res.text();
+        setSvgCode(text);
+      } catch (e) { console.error(e); }
+    }
+    if (voltages?.length > 0) fetchSvg();
   }, [JSON.stringify(voltages), dataCenterBus]);
 
-  const fetchHeatmap = async (v: number[], dcBus?: number | null) => {
-    setFetching(true); setError(null);
-      const HF_SPACE_URL = "https://gpu2grid-live.hf.space";
-      try {
-      const res = await fetch(`${HF_SPACE_URL}/api/heatmap`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ voltages: v, dataCenterBus: dcBus ?? null }),
-      });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const blob = await res.blob();
-      const url  = URL.createObjectURL(blob);
-      setImgSrc(prev => { if (prev) URL.revokeObjectURL(prev); return url; });
-    } catch (e) {
-      setError((e as Error).message);
-    } finally { setFetching(false); }
-  };
+  // mouse events
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container) return;
 
-  const busy = loading || fetching;
+    const handleMouseMove = (e: MouseEvent) => {
+      const target = e.target as SVGElement;
+      const busElement = target.closest('[id^="bus-node-"]');
+
+      if (busElement) {
+        const rect = container.getBoundingClientRect();
+        const x = e.clientX - rect.left;
+        const y = e.clientY - rect.top;
+        
+        const busId = parseInt(busElement.id.split('-').pop() || "0");
+        
+        setTooltipPos({ x, y });
+        setHoveredBus(busId);
+      } else {
+        setHoveredBus(null);
+      }
+    };
+
+    const handleClick = (e: MouseEvent) => {
+      const target = e.target as SVGElement;
+      const busElement = target.closest('[id^="bus-node-"]');
+
+      if (busElement) {
+        const busId = parseInt(busElement.id.split('-').pop() || "0");
+        setSelectedBus(selectedBus === busId ? null : busId);
+      } else {
+        setSelectedBus(null);
+      }
+    };
+
+    container.addEventListener("mousemove", handleMouseMove);
+    container.addEventListener("click", handleClick);
+    return () => {
+      container.removeEventListener("mousemove", handleMouseMove);
+      container.removeEventListener("click", handleClick);
+    };
+  }, [svgCode, selectedBus]);
+
+
+  const activeBusId = hoveredBus || selectedBus;
 
   return (
-    <div style={{ background: "#f8fafc", border: "1px solid #e2e8f0", borderRadius: 8, padding: "16px 20px" }}>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
-        <div>
-          <div style={{ fontWeight: 800, fontSize: 13, color: "#0f172a" }}>Voltage Heatmap</div>
-        </div>
-        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-          {label && (
-            <span style={{
-              fontSize: 10, fontWeight: 700, padding: "3px 10px", borderRadius: 20,
-              background: label.includes("LLM") ? "#fef9c3" : "#f0fdf4",
-              color:      label.includes("LLM") ? "#854d0e"  : "#166534",
-              border: `1px solid ${label.includes("LLM") ? "#fde047" : "#bbf7d0"}`,
-            }}>{label}</span>
-          )}
-          {busy && (
-            <div style={{ display: "flex", alignItems: "center", gap: 6, color: "#0891b2", fontSize: 11, fontWeight: 700 }}>
-              <div style={{ width: 12, height: 12, borderRadius: "50%", border: "2px solid #e2e8f0", borderTopColor: "#0891b2", animation: "spin 0.8s linear infinite" }} />
-              <style>{`@keyframes spin{to{transform:rotate(360deg)}}`}</style>
-              Rendering…
-            </div>
-          )}
-        </div>
-      </div>
+    <div style={{ background: "#f8fafc", padding: "20px", borderRadius: "12px", border: "1px solid #e2e8f0", position: 'relative' }}>
+      <div 
+        ref={containerRef}
+        className="svg-heatmap"
+        style={{ position: 'relative' }}
+        dangerouslySetInnerHTML={{ __html: svgCode }} 
+      />
 
-      {error && (
-        <div style={{ color: "#ef4444", fontSize: 11, padding: "8px 12px",
-          background: "#fef2f2", borderRadius: 6, border: "1px solid #fca5a5", marginBottom: 10 }}>
-          ⚠ {error}
-        </div>
-      )}
+      {}
+      {activeBusId && tooltipPos && (() => {
+        const v = voltages[activeBusId - 1];
+        let status = "NORMAL";
+        let statusColor = "#16a34a";
 
-      {!imgSrc && !busy && !error && (
-        <div style={{ textAlign: "center", color: "#94a3b8", fontSize: 12,
-          padding: "40px 0", border: "1px dashed #e2e8f0", borderRadius: 6 }}>
-          Run power flow to generate heatmap
-        </div>
-      )}
+        if (v < 0.95) { status = "UNDER-VOLTAGE"; statusColor = "#ef4444"; }
+        else if (v > 1.05) { status = "OVER-VOLTAGE"; statusColor = "#f59e0b"; }
 
-      {imgSrc && (
-        <img src={imgSrc} alt="Voltage heatmap"
-          style={{ width: "100%", borderRadius: 6, display: "block",
-            opacity: busy ? 0.4 : 1, transition: "opacity 0.15s" }} />
-      )}
-
-      {voltages?.length === 13 && (
-        <div style={{ marginTop: 10, display: "flex", flexWrap: "wrap", gap: 5 }}>
-          {voltages.map((v, i) => {
-            const isDC = dataCenterBus === i + 1;
-            return (
-              <div key={i} style={{
-                fontSize: 10, fontWeight: 700, padding: "3px 7px", borderRadius: 4,
-                background: isDC ? '#0891b2' : v < 0.95 ? "#fef2f2" : v > 1.05 ? "#fffbeb" : "#f0fdf4",
-                color:      isDC ? '#fff'     : v < 0.95 ? "#ef4444" : v > 1.05 ? "#f59e0b" : "#16a34a",
-                border: `2px solid ${isDC ? '#0891b2' : v < 0.95 ? "#fca5a5" : v > 1.05 ? "#fde68a" : "#bbf7d0"}`,
+        return (
+          <div style={{ 
+            position: 'absolute', 
+            left: tooltipPos.x + 15, 
+            top: tooltipPos.y - 75,
+            zIndex: 100,
+            padding: "10px 14px", 
+            backgroundColor: "rgba(255, 255, 255, 0.98)", 
+            border: `2px solid ${statusColor}`, 
+            borderRadius: "10px", 
+            boxShadow: "0 6px 16px rgba(0,0,0,0.12)",
+            pointerEvents: 'none', 
+            minWidth: '160px',
+            transition: 'top 0.1s ease-out, left 0.1s ease-out' 
+          }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 }}>
+              <span style={{ fontSize: '10px', fontWeight: 800, color: '#64748b' }}>BUS {activeBusId}</span>
+              <span style={{ 
+                fontSize: '9px', fontWeight: 900, padding: '2px 6px', borderRadius: '4px', 
+                backgroundColor: `${statusColor}22`, color: statusColor, border: `1px solid ${statusColor}44`
               }}>
-               B{i+1}: {v.toFixed(3)}
+                {status}
+              </span>
+            </div>
+            
+            <div style={{ fontSize: '22px', fontWeight: 900, color: statusColor, lineHeight: 1 }}>
+              {v?.toFixed(4)} <span style={{ fontSize: '12px', fontWeight: 600 }}>p.u.</span>
+            </div>
+            
+            <div style={{ fontSize: '10px', color: '#94a3b8', marginTop: 4 }}>
+               Node Name: {BUS_NAMES[activeBusId]}
+            </div>
+            {selectedBus === activeBusId && (
+              <div style={{ fontSize: '9px', color: '#0891b2', fontStyle: 'italic', marginTop: 2 }}>
+                Locked (Click again to release)
               </div>
-            );
-          })}
-        </div>
-      )}
+            )}
+          </div>
+        );
+      })()}
+
+      <style>{`
+        .svg-heatmap svg { width: 100% !important; height: auto !important; display: block; }
+        [id^="bus-node-"] { cursor: pointer; pointer-events: all; transition: opacity 0.2s; }
+        [id^="bus-node-"]:hover { opacity: 0.6; }
+      `}</style>
     </div>
   );
 }
