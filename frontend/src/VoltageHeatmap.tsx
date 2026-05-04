@@ -134,7 +134,6 @@ export default function VoltageHeatmap({ voltages, dataCenterBus }: Props) {
             </div>
             {selectedBus === activeBusId && (
               <div style={{ fontSize: '9px', color: '#0891b2', fontStyle: 'italic', marginTop: 2 }}>
-                Locked (Click again to release)
               </div>
             )}
           </div>
