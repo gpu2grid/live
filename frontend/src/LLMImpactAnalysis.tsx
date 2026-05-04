@@ -117,7 +117,7 @@ export default function LLMImpactAnalysis({ onVoltagesUpdated, onLoadingChanged,
 
   // Playback
   const [isPlaying, setIsPlaying] = useState(false);
-  const [playSpeed, setPlaySpeed] = useState(1);
+  const [playSpeed, setPlaySpeed] = useState(2);
 
   const snap  = data?.timeSeries[selIdx] ?? null;
   const atEnd = data ? selIdx >= data.timeSeries.length - 1 : false;
@@ -419,7 +419,7 @@ export default function LLMImpactAnalysis({ onVoltagesUpdated, onLoadingChanged,
               <div style={{ flex: 1 }} />
               <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
                 <span style={{ fontSize: 10, color: '#94a3b8', fontWeight: 700 }}>SPEED:</span>
-                {[1, 2, 4, 8].map(s => (
+                {[2, 4, 8].map(s => (
                   <button key={s} onClick={() => setPlaySpeed(s)} style={{ border: `1px solid ${playSpeed === s ? '#0891b2' : '#cbd5e1'}`, background: playSpeed === s ? '#ecfeff' : '#fff', color: playSpeed === s ? '#0891b2' : '#64748b', borderRadius: 4, padding: '4px 8px', fontSize: 10, fontWeight: playSpeed === s ? 800 : 600, cursor: 'pointer' }}>{s}×</button>
                 ))}
               </div>

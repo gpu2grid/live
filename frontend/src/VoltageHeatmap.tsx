@@ -21,20 +21,23 @@ export default function VoltageHeatmap({ voltages, dataCenterBus }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
 
   //ger svg
-  useEffect(() => {
-    async function fetchSvg() {
-      try {
-        const res = await fetch(`${API_URL}/api/heatmap`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ voltages, dataCenterBus }),
-        });
-        const text = await res.text();
-        setSvgCode(text);
-      } catch (e) { console.error(e); }
-    }
-    if (voltages?.length > 0) fetchSvg();
-  }, [JSON.stringify(voltages), dataCenterBus]);
+  const lastFetchRef = useRef<number>(0);
+
+useEffect(() => {
+  if (!voltages?.length) return;
+  const now = Date.now();
+  if (now - lastFetchRef.current < 500) return;
+  lastFetchRef.current = now;
+
+  fetch(`${API_URL}/api/heatmap`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ voltages, dataCenterBus }),
+  })
+    .then(r => r.text())
+    .then(setSvgCode)
+    .catch(console.error);
+}, [JSON.stringify(voltages), dataCenterBus]);
 
   // mouse events
   useEffect(() => {
