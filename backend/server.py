@@ -33,8 +33,32 @@ from  openg2g.grid.config import TapPosition
 from  openg2g.controller.tap_schedule import TapScheduleController
 from  openg2g.metrics.voltage import compute_allbus_voltage_stats
 
-#run one simulation at a time
-dss_lock = threading.Lock()
+import asyncio, uuid, time
+from concurrent.futures import ProcessPoolExecutor
+
+import sqlite3, json
+
+conn = sqlite3.connect("jobs.db", check_same_thread=False, timeout=30)
+conn.execute("PRAGMA journal_mode=WAL;")
+
+
+# create table to track background simulation jobs
+conn.execute("""
+CREATE TABLE IF NOT EXISTS jobs (
+    id TEXT PRIMARY KEY,
+    status TEXT,
+    result TEXT,
+    error TEXT
+)
+""")
+conn.commit()
+
+#currently set to 2 for free tier at hf
+_pool        = ProcessPoolExecutor(max_workers=2)  
+_jobs: dict  = {}
+_start_time  = time.time()
+
+
 
 DSS_DIR     = Path(__file__).parent / "examples/ieee13"
 DSS_MASTER  = "IEEE13Nodeckt.dss"
@@ -225,19 +249,85 @@ def _make_tap(v: float):
 
 """Run  datacenter + grid simulation."""
 def _run(dc, grid, tap_pu, dc_bus, duration_s):
+    coord = Coordinator(
+        datacenter=dc, grid=grid,
+        controllers=[TapScheduleController(
+            schedule=_make_tap(tap_pu), dt_s=Fraction(1)
+        )],
+        total_duration_s=duration_s,
+        dc_bus=dc_bus,
+    )
+    return coord.run()
+
+
+"""
+    Runs one full simulation job (datacenter + grid) in a worker process
+    and returns results for the API.
+    """
+def _run_full(req_dict: dict) -> dict:
+
+    dc_bus   = BUS_INDEX_TO_NAME.get(req_dict["targetBus"], "671")
+    replicas = max(1, req_dict["numReplicas"])
+
+    dc, raw_power_W = _build_dc_from_real_trace(
+        model_label  = req_dict["modelLabel"],
+        num_gpus     = req_dict["numGpus"],
+        max_num_seqs = req_dict["maxNumSeqs"],
+        num_replicas = replicas,
+        duration_s   = req_dict["durationS"],
+    )
+    grid = _build_grid(req_dict["substationVoltage"], dc_bus)
+    log  = _run(dc, grid, req_dict["substationVoltage"], dc_bus, req_dict["durationS"])
+
+    step       = max(1, req_dict["sampleInterval"])
+    gs_sampled = log.grid_states[::step]
+    t_sampled  = list(log.time_s[::step])
+    dc_states  = log.dc_states
+
+    results = []
+    for i, (t, gs) in enumerate(zip(t_sampled, gs_sampled)):
+        vs   = _voltages(gs)
+        dc_i = min(range(len(dc_states)), key=lambda j: abs(dc_states[j].time_s - t))
+        ds   = dc_states[dc_i]
+        kw   = float((ds.power_w.a + ds.power_w.b + ds.power_w.c) / 1000)
+        
+        
+        if math.isnan(kw): kw = 0.0
+        trace_idx = min(int(t / 0.1), len(raw_power_W) - 1) if raw_power_W else 0
+        raw_kw    = raw_power_W[trace_idx] / 1000.0 if raw_power_W else kw
+        results.append({
+            "time":               float(t),
+            "gpu_power_W":        kw * 1000,
+            "gpu_power_kW":       kw,
+            "gpu_power_raw_kW":   raw_kw,
+            "gpu_reactive_kVAR":  kw * 0.329,
+            "active_gpus":        replicas * req_dict["numGpus"],
+            "voltages":           vs,
+            "min_voltage":        min(vs),
+            "max_voltage":        max(vs),
+            "target_bus_voltage": vs[req_dict["targetBus"] - 1],
+            "total_load_kW":      kw,
+        })
+
+    return {
+        "numSamples":   len(results),
+        "targetBus":    req_dict["targetBus"],
+        "modelLabel":   req_dict["modelLabel"],
+        "numGpus":      req_dict["numGpus"],
+        
+        
+        "maxNumSeqs":   req_dict["maxNumSeqs"],
+        "numReplicas":  replicas,
+        "duration":     float(max(r["time"] for r in results) if results else 0),
+        "minVoltage":   float(min(r["min_voltage"] for r in results) if results else 1.0),
+        "maxVoltage":   float(max(r["max_voltage"] for r in results) if results else 1.0),
+        "avgGpuPower":  float(sum(r["gpu_power_W"] for r in results) / len(results) if results else 0),
+        "peakGpuPower": float(max(r["gpu_power_W"] for r in results) if results else 0),
+        "timeSeries":   results,
+    }
     
-    #run one simulation at time 
     
-    with dss_lock:
-        coord = Coordinator(
-            datacenter=dc, grid=grid,
-             controllers=[TapScheduleController(
-                schedule=_make_tap(tap_pu), dt_s=Fraction(1)
-            )],
-            total_duration_s=duration_s,
-            dc_bus=dc_bus,
-        )
-        return coord.run()
+    
 
 """Get per-bus voltage (worst phase per bus)."""
 def _voltages(gs, debug=False) -> list[float]:
@@ -263,10 +353,11 @@ def _voltages(gs, debug=False) -> list[float]:
 app = FastAPI()
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["https://gpu2grid.io"],
+    allow_origins=["https://gpu2grid.io", "http://localhost:5173", "http://localhost:5174"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    allow_origin_regex=".*",
 )
 
 
@@ -297,9 +388,44 @@ def health():
     return {"status": "ok", "data_ready": _DATA_DIR.exists(),
             "message": "gpu2grid OpenDSS server"}
 
-@app.get("/health")
-def health():
-    return "OK"
+
+
+@app.get("/api/status")
+def status():
+    active = conn.execute(
+        "SELECT COUNT(*) FROM jobs WHERE status='pending'"
+    ).fetchone()[0]
+
+    total = conn.execute(
+        "SELECT COUNT(*) FROM jobs"
+    ).fetchone()[0]
+
+    return {
+        "active_jobs": active,
+        "total_jobs": total,
+        "workers": _pool._max_workers,
+    }
+    
+    
+
+@app.get("/api/job/{job_id}")
+def get_job(job_id: str):
+    row = conn.execute(
+        "SELECT status, result, error FROM jobs WHERE id=?",
+        (job_id,)
+    ).fetchone()
+
+    if not row:
+        raise HTTPException(404, "Job not found")
+
+    status, result, error = row
+
+    if status == "done":
+        return {"status": status, "result": json.loads(result)}
+    elif status == "error":
+        return {"status": status, "detail": error}
+    else:
+        return {"status": status}
 
 
 """Return available traces"""
@@ -312,7 +438,6 @@ def list_traces():
 
     traces = df[["model_label","num_gpus","max_num_seqs"]].to_dict("records")
 
-    # Group by model for convenient frontend rendering
     models = []
     for model_label, group in df.groupby("model_label"):
         models.append({
@@ -334,13 +459,13 @@ def list_traces():
 """Baseline grid simulation, no workload"""
 @app.post("/api/powerflow")
 async def powerflow(req: PowerflowRequest):
-    print(f"\n📊 Powerflow v={req.substationVoltage}")
+    print(f"\nPowerflow v={req.substationVoltage}")
     try:
         dc   = _build_dc(scale=0.001, duration_s=5)
         grid = _build_grid(req.substationVoltage, "671")
         log  = _run(dc, grid, req.substationVoltage, "671", 5)
         vs   = _voltages(log.grid_states[-1], debug=True)
-        print(f"✅ min={min(vs):.4f}  max={max(vs):.4f}")
+        print(f" min={min(vs):.4f}  max={max(vs):.4f}")
         return {"buses": [{"id": i+1, "voltage": v, "activePower": 0.0,
                             "reactivePower": 0.0} for i, v in enumerate(vs)],
                 "lines": []}
@@ -353,89 +478,36 @@ async def powerflow(req: PowerflowRequest):
 """Simulate AI workload impact on grid using GPU traces."""
 @app.post("/api/llm-impact")
 async def llm_impact(req: LLMImpactRequest):
-    # 1. Map target bus index to OpenDSS bus name
-    dc_bus = BUS_INDEX_TO_NAME.get(req.targetBus, "671")
-    
-    # 2. Use the exact replica count from the frontend
-    replicas = max(1, req.numReplicas)
+    job_id = uuid.uuid4().hex
 
-    print(f"\n🤖 LLM Impact Simulation")
-    print(f"   Bus: {req.targetBus} ({dc_bus}) | Model: {req.modelLabel}")
-    print(f"   Config: {req.numGpus} GPUs/replica | {req.maxNumSeqs} Seq Len")
-    print(f"   Replicas: {replicas} | Substation V: {req.substationVoltage}")
+    conn.execute(
+        "INSERT INTO jobs (id, status) VALUES (?, ?)",
+        (job_id, "pending")
+    )
+    conn.commit()
 
-    try:
-        # 3. build dc from real trace
-        dc, raw_power_W = _build_dc_from_real_trace(
-            model_label  = req.modelLabel,
-            num_gpus     = req.numGpus,
-            max_num_seqs = req.maxNumSeqs,
-            num_replicas = replicas,
-            duration_s   = req.durationS,
-        )
+    async def run_and_store():
+        try:
+            loop = asyncio.get_event_loop()
+            result = await loop.run_in_executor(_pool, _run_full, req.dict())
 
-        # 4. Run the grid simulation
-        grid = _build_grid(req.substationVoltage, dc_bus)
-        log  = _run(dc, grid, req.substationVoltage, dc_bus, req.durationS)
+            conn.execute(
+                "UPDATE jobs SET status=?, result=? WHERE id=?",
+                ("done", json.dumps(result), job_id)
+            )
+            conn.commit()
 
-        # 5. Process results for frontebd
-        step = max(1, req.sampleInterval)
-        gs_sampled = log.grid_states[::step]
-        t_sampled  = list(log.time_s[::step])
-        dc_states  = log.dc_states
+        except Exception as e:
+            conn.execute(
+                "UPDATE jobs SET status=?, error=? WHERE id=?",
+                ("error", str(e), job_id)
+            )
+            conn.commit()
 
-        results = []
-        for i, (t, gs) in enumerate(zip(t_sampled, gs_sampled)):
-            vs = _voltages(gs, debug=(i == 0))
-            
-            # Match grid time to DC power state
-            dc_i = min(range(len(dc_states)), key=lambda j: abs(dc_states[j].time_s - t))
-            ds   = dc_states[dc_i]
-            
-            # Sum power across phases A, B, C (convert Watts to kW)
-            kw = float((ds.power_w.a + ds.power_w.b + ds.power_w.c) / 1000)
-            if math.isnan(kw): kw = 0.0
+    asyncio.create_task(run_and_store())
+    return {"job_id": job_id}
 
-            # Match with the raw trace index for display
-            trace_idx = min(int(t / 0.1), len(raw_power_W) - 1) if raw_power_W else 0
-            raw_kw    = raw_power_W[trace_idx] / 1000.0 if raw_power_W else kw
 
-            results.append({
-                "time":               float(t),
-                "gpu_power_W":        kw * 1000,
-                "gpu_power_kW":       kw,
-                "gpu_power_raw_kW":   raw_kw,
-                "gpu_reactive_kVAR":  kw * 0.329,
-                "active_gpus":        replicas * req.numGpus,
-                "voltages":           vs,
-                "min_voltage":        min(vs),
-                "max_voltage":        max(vs),
-                "target_bus_voltage": vs[req.targetBus - 1],
-                "total_load_kW":      kw,
-            })
-
-        # 6. Return standard response
-        return {
-            "numSamples":    len(results),
-            "targetBus":     req.targetBus,
-            "modelLabel":    req.modelLabel,
-            "numGpus":       req.numGpus,
-            "maxNumSeqs":    req.maxNumSeqs,
-            "numReplicas":   replicas,
-            "duration":      float(max(r["time"] for r in results) if results else 0),
-            "minVoltage":    float(min(r["min_voltage"] for r in results) if results else 1.0),
-            "maxVoltage":    float(max(r["max_voltage"] for r in results) if results else 1.0),
-            "avgGpuPower":   float(sum(r["gpu_power_W"] for r in results) / len(results) if results else 0),
-            "peakGpuPower":  float(max(r["gpu_power_W"] for r in results) if results else 0),
-            "timeSeries":    results,
-        }
-
-    except Exception as e:
-        import traceback
-        traceback.print_exc()
-        # Very important: if the model_label doesn't match the CSV names, 
-        # _get_trace_power will raise a ValueError. This catch will show you why.
-        raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/heatmap")
 async def heatmap(req: HeatmapRequest):
@@ -464,4 +536,4 @@ if __name__ == "__main__":
         print(f"   Models: {models}")
         print(f"   Traces: {len(df)} configurations")
     print("="*70 + "\n")
-    uvicorn.run(app, host="0.0.0.0", port=8080, log_level="info")
+    uvicorn.run("server:app", host="0.0.0.0", port=8080, workers=1, log_level="info")
