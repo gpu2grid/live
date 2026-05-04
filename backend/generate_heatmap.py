@@ -1,9 +1,3 @@
-"""
-generate_heatmap.py
-Generates a voltage heatmap for the IEEE 13-bus system with topology overlay.
-Called by Julia: python3 generate_heatmap.py <output_path> <v1> <v2> ... <v13>
-"""
-
 import sys
 import numpy as np
 import matplotlib
@@ -12,7 +6,9 @@ import matplotlib.pyplot as plt
 import matplotlib.image as mpimg
 import matplotlib.patches as mpatches
 from matplotlib.lines import Line2D
-from scipy.interpolate import griddata
+import matplotlib.cm as cm
+import matplotlib.colors as mcolors
+
 
 
 BUS_NAMES = {
@@ -64,13 +60,9 @@ def generate_heatmap(voltages, output_path, vmin=0.92, vmax=1.06, map_image="13b
     xmin_d, xmax_d = -10, 1005
     ymin_d, ymax_d = -10, 705
 
-    x = np.append(xs, [xmin_d, xmin_d, xmax_d, xmax_d])
-    y = np.append(ys, [ymin_d, ymax_d, ymin_d, ymax_d])
-    z = np.append(zs, [np.mean(zs)] * 4)
 
-    xi = np.linspace(xmin_d, xmax_d, 1000)
-    yi = np.linspace(ymin_d, ymax_d, 1000)
-    zi = griddata((x, y), z, (xi[None, :], yi[:, None]), method='cubic')
+
+  
 
     fig, ax = plt.subplots(figsize=(12, 8), frameon=False)
     ax.set_xlim(xmin_d, xmax_d)
@@ -79,13 +71,6 @@ def generate_heatmap(voltages, output_path, vmin=0.92, vmax=1.06, map_image="13b
     ax.set_axis_off()
 
     # heatmap
-    im2 = ax.contourf(xi, yi, zi, levels=20,
-                      vmin=vmin, vmax=vmax,
-                      cmap='RdYlGn', alpha=0.75, zorder=1)
-    ax.contour(xi, yi, zi, levels=10,
-               vmin=vmin, vmax=vmax,
-               cmap='RdYlGn', alpha=0.3,
-               linewidths=0.5, zorder=2)
 
    
     try:
@@ -129,10 +114,11 @@ def generate_heatmap(voltages, output_path, vmin=0.92, vmax=1.06, map_image="13b
         bus_color = plt.cm.RdYlGn(t)
 
         marker = 's' if bus_id == 1 else 'o'
-        ax.scatter(bx, by, s=200, color=bus_color,
-                   marker=marker, edgecolors='#1e293b',
-                   linewidths=2, zorder=8)
-
+        path_collection = ax.scatter(bx, by, s=200, color=bus_color,
+                                 marker=marker, edgecolors='#1e293b',
+                                 linewidths=2, zorder=8)
+        path_collection.set_gid(f"bus-node-{bus_id}")
+   
         v_color = '#dc2626' if v < 0.95 else '#d97706' if v > 1.05 else '#166534'
         ax.text(bx, by + 30, f'Bus {bus_id}',
                 fontsize=7.5, fontweight='bold', color='#1e293b',
@@ -160,13 +146,22 @@ def generate_heatmap(voltages, output_path, vmin=0.92, vmax=1.06, map_image="13b
             arrowprops=dict(arrowstyle='->', color='#0891b2', lw=1.5),
         )
 
-    cbar = fig.colorbar(im2, ax=ax, shrink=0.6, pad=0.02, aspect=25)
+    norm = mcolors.Normalize(vmin=vmin, vmax=vmax)
+    sm = plt.cm.ScalarMappable(cmap='RdYlGn', norm=norm)
+    sm.set_array([])
+    
+    
+    cbar = fig.colorbar(sm, ax=ax, shrink=0.6, pad=0.02, aspect=25)
     cbar.set_label('Voltage (p.u.)', fontsize=10, labelpad=8)
     cbar.ax.tick_params(labelsize=8)
-    cbar.ax.axhline(y=(0.95 - vmin) / (vmax - vmin),
-                    color='#ef4444', linewidth=1.5, linestyle='--')
-    cbar.ax.axhline(y=(1.05 - vmin) / (vmax - vmin),
-                    color='#f59e0b', linewidth=1.5, linestyle='--')
+    
+    
+    cbar.ax.axhline(y=(0.95 - vmin) / (vmax - vmin), color='#ef4444', linewidth=1.5, linestyle='--')
+    cbar.ax.axhline(y=(1.05 - vmin) / (vmax - vmin), color='#f59e0b', linewidth=1.5, linestyle='--')
+    
+    ax.set_facecolor('white')
+    fig.patch.set_facecolor('white')
+   
 
 
 
@@ -198,7 +193,8 @@ def generate_heatmap(voltages, output_path, vmin=0.92, vmax=1.06, map_image="13b
               handlelength=1.5, handleheight=1.0)
 
     plt.tight_layout(pad=0.3)
-    plt.savefig(output_path, format='png', bbox_inches='tight', dpi=150)
+    plt.rcParams['svg.fonttype'] = 'none'
+    plt.savefig(output_path, format='svg', bbox_inches='tight', dpi=150, facecolor='white')
     plt.close()
     print(f"[ok] saved {output_path}")
 
