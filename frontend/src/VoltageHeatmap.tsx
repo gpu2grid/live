@@ -9,6 +9,8 @@ const BUS_NAMES: Record<number, string> = {
 interface Props {
   voltages: number[];
   dataCenterBus?: number | null;
+  loading?: boolean; 
+  label?: string;
 }
 
 export default function VoltageHeatmap({ voltages, dataCenterBus }: Props) {
