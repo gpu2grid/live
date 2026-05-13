@@ -19,4 +19,4 @@ Thumbs.db
 # Node
 node_modules/
 dist/
-.env.local
+.env.localjobs.db*
