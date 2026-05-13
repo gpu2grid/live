@@ -13,6 +13,7 @@ import { useTour, TOUR_STORAGE_KEY } from './useTour';
 
 const fmt = (n: number | undefined | null, digits = 2, fallback = '—') =>
   n != null && isFinite(n) ? n.toFixed(digits) : fallback;
+  
 
 interface TimestepData {
   time: number;
@@ -75,16 +76,31 @@ const BUS_INFO: Record<number, { name: string; baseLoad: number }> = {
   13: { name: '692',              baseLoad: 0    },
 };
 
+// ── Safe accessors ────────────────────────────────────────────────────────────
+
+/** Safely get a voltage value from a snap's voltages array */
+const snapVoltage = (snap: TimestepData | null | undefined, busIndex: number): number | null => {
+  if (!snap?.voltages || !Array.isArray(snap.voltages)) return null;
+  const v = snap.voltages[busIndex];
+  return (v != null && isFinite(v)) ? v : null;
+};
+
+/** Safe toFixed that falls back to a default string */
+const safeFixed = (v: number | null | undefined, digits = 4, fallback = '—'): string =>
+  v != null && isFinite(v) ? v.toFixed(digits) : fallback;
+
+// ─────────────────────────────────────────────────────────────────────────────
+
 const ViolTooltip: React.FC<any> = ({ active, payload }) => {
   if (!active || !payload?.length) return null;
   const d = payload[0].payload;
   return (
     <div style={{ background: '#fff', border: '1px solid #cbd5e1', borderRadius: 6, padding: '8px 12px', fontSize: 11, boxShadow: '0 2px 8px rgba(0,0,0,0.1)' }}>
       <div style={{ fontWeight: 800, marginBottom: 4 }}>Bus {d.bus} ({BUS_INFO[d.bus]?.name})</div>
-      <div style={{ color: '#ef4444', marginBottom: 2 }}>Under-voltage: {fmt(d.underPct, 1)}%</div>
-      <div style={{ color: '#f59e0b', marginBottom: 4 }}>Over-voltage: {fmt(d.overPct, 1)}%</div>
+      <div style={{ color: '#ef4444', marginBottom: 2 }}>Under-voltage: {safeFixed(d.underPct, 1)}%</div>
+      <div style={{ color: '#f59e0b', marginBottom: 4 }}>Over-voltage: {safeFixed(d.overPct, 1)}%</div>
       <div style={{ color: '#94a3b8', fontSize: 10, borderTop: '1px solid #e2e8f0', paddingTop: 4 }}>
-        Min: {fmt(d.minV, 4)} · Max: {fmt(d.maxV, 4)} p.u.
+        Min: {safeFixed(d.minV, 4)} · Max: {safeFixed(d.maxV, 4)} p.u.
       </div>
     </div>
   );
@@ -93,11 +109,12 @@ const ViolTooltip: React.FC<any> = ({ active, payload }) => {
 const MiniTooltip: React.FC<any> = ({ active, payload }) => {
   if (!active || !payload?.length) return null;
   const d = payload[0].payload;
+  const v: number | undefined = d.v;
   return (
     <div style={{ background: '#fff', border: '1px solid #cbd5e1', borderRadius: 6, padding: '6px 10px', fontSize: 10, boxShadow: '0 2px 8px rgba(0,0,0,0.1)' }}>
-      <div style={{ fontWeight: 700, marginBottom: 2 }}>t = {fmt(d.t, 2)}s</div>
-      <div style={{ color: d.v < 0.95 ? '#ef4444' : d.v > 1.05 ? '#f59e0b' : '#16a34a' }}>
-        V = {fmt(d.v, 4)} p.u.
+      <div style={{ fontWeight: 700, marginBottom: 2 }}>t = {safeFixed(d.t, 2)}s</div>
+      <div style={{ color: v == null ? '#94a3b8' : v < 0.95 ? '#ef4444' : v > 1.05 ? '#f59e0b' : '#16a34a' }}>
+        V = {safeFixed(v, 4)} p.u.
       </div>
     </div>
   );
@@ -122,9 +139,11 @@ export default function LLMImpactAnalysis({ onVoltagesUpdated, onLoadingChanged,
   const [isPlaying, setIsPlaying] = useState(false);
   const [playSpeed, setPlaySpeed] = useState(2);
   const timeSeries = data?.timeSeries ?? [];
-  const safeIdx = timeSeries.length > 0 ? Math.min(selIdx, timeSeries.length - 1) : 0;
-  const snap  = timeSeries[safeIdx] ?? null;
-  const atEnd = timeSeries.length > 0 ? safeIdx >= timeSeries.length - 1 : false;
+
+  // Clamp selIdx to valid range (defensive against stale index after data changes)
+  const safeSelIdx = timeSeries.length > 0 ? Math.min(selIdx, timeSeries.length - 1) : 0;
+  const snap  = timeSeries[safeSelIdx] ?? null;
+  const atEnd = safeSelIdx >= (timeSeries.length - 1);
 
   const tour = useTour({ hasData: !!data });
 
@@ -174,14 +193,14 @@ export default function LLMImpactAnalysis({ onVoltagesUpdated, onLoadingChanged,
   };
 
   useEffect(() => {
-    if (snap?.voltages && data) {
+    if (snap?.voltages?.length && data) {
       onVoltagesUpdated?.(
         snap.voltages,
-        `${data.modelLabel} (seqs=${data.maxNumSeqs}) @ t=${fmt(snap.time, 1)}s — ${fmt(snap.gpu_power_kW, 0)} kW on Bus ${targetBus}`,
+        `${data.modelLabel} (seqs=${data.maxNumSeqs}) @ t=${safeFixed(snap.time, 1)}s — ${safeFixed(snap.gpu_power_kW, 0)} kW on Bus ${targetBus}`,
         targetBus
       );
     }
-  }, [selIdx]);
+  }, [safeSelIdx]); // use safeSelIdx so this doesn't fire on stale index
 
 
   const handleReset = () => {
@@ -193,7 +212,7 @@ export default function LLMImpactAnalysis({ onVoltagesUpdated, onLoadingChanged,
     setLoading(true); setError(null); setData(null);
     setSelIdx(0); setIsPlaying(false);
     onLoadingChanged?.(true);
-
+  
     try {
       const res = await fetch(`${API_URL}/api/llm-impact`, {
         method: 'POST',
@@ -210,14 +229,22 @@ export default function LLMImpactAnalysis({ onVoltagesUpdated, onLoadingChanged,
       });
       if (!res.ok) throw new Error(await res.text() || `HTTP ${res.status}`);
       const result: AnalysisData = await res.json();
-      setSelIdx(0);
 
+      // Validate response shape before setting state
+      if (!result || !Array.isArray(result.timeSeries) || result.timeSeries.length === 0) {
+        throw new Error('Invalid response from server: empty or malformed timeSeries');
+      }
+
+      setSelIdx(0);
       setData(result);
-      if (result?.timeSeries?.length) {
-        const peakStep = result.timeSeries.reduce((a, b) => b.gpu_power_kW > a.gpu_power_kW ? b : a);
+
+      const peakStep = result.timeSeries.reduce((a, b) =>
+        (b.gpu_power_kW ?? 0) > (a.gpu_power_kW ?? 0) ? b : a
+      );
+      if (peakStep?.voltages?.length) {
         onVoltagesUpdated?.(
           peakStep.voltages,
-          `${result.modelLabel} peak — ${fmt(peakStep.gpu_power_kW, 0)} kW on Bus ${targetBus}`,
+          `${result.modelLabel} peak — ${safeFixed(peakStep.gpu_power_kW, 0)} kW on Bus ${targetBus}`,
           targetBus
         );
       }
@@ -232,14 +259,17 @@ export default function LLMImpactAnalysis({ onVoltagesUpdated, onLoadingChanged,
   const violStats = useMemo(() => {
     if (!data) return [];
     const n = timeSeries.length;
+    if (n === 0) return [];
     return Array.from({ length: 13 }, (_, i) => {
       const bus    = i + 1;
       const vSeries = timeSeries.map(d => d.voltages?.[i] ?? 1.0);
       const under  = vSeries.filter(v => v < 0.95).length;
       const over   = vSeries.filter(v => v > 1.05).length;
+      const minV   = vSeries.length ? Math.min(...vSeries) : 1.0;
+      const maxV   = vSeries.length ? Math.max(...vSeries) : 1.0;
       return { bus, total: n, under, over,
         underPct: (under / n) * 100, overPct: (over / n) * 100,
-        minV: Math.min(...vSeries), maxV: Math.max(...vSeries),
+        minV, maxV,
         isTarget: bus === targetBus };
     });
   }, [data, targetBus]);
@@ -251,13 +281,19 @@ export default function LLMImpactAnalysis({ onVoltagesUpdated, onLoadingChanged,
       const series = timeSeries.map((d, idx) => ({ t: d.time, v: d.voltages?.[i] ?? 1.0, _i: idx }));
       const voltages   = series.map(s => s.v);
       const violations = voltages.filter(v => v < 0.95 || v > 1.05).length;
-      return { bus, series, minV: Math.min(...voltages), maxV: Math.max(...voltages), violations, isTarget: bus === targetBus };
+      const minV = voltages.length ? Math.min(...voltages) : 1.0;
+      const maxV = voltages.length ? Math.max(...voltages) : 1.0;
+      return { bus, series, minV, maxV, violations, isTarget: bus === targetBus };
     });
   }, [data, targetBus]);
 
+  // GPU power chart data (raw trace values)
   const powerChartData = useMemo(() => {
     if (!data) return [];
-    return timeSeries.map(d => ({ t: d.time, kw: d.gpu_power_raw_kW ?? d.gpu_power_kW }));
+    return timeSeries.map(d => ({
+      t: d.time,
+      kw: d.gpu_power_raw_kW ?? d.gpu_power_kW ?? 0,
+    }));
   }, [data]);
 
   return (
@@ -274,7 +310,7 @@ export default function LLMImpactAnalysis({ onVoltagesUpdated, onLoadingChanged,
       <div id="llm-header" style={{ borderBottom: '1px solid #e2e8f0', background: '#f8fafc', padding: '16px 24px', display: 'flex', flexWrap: 'wrap', alignItems: 'flex-end', gap: 20, justifyContent: 'space-between' }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
           <div style={{ fontWeight: 800, fontSize: 14, color: '#0f172a' }}>LLM GRID IMPACT</div>
-
+        
           <button
             onClick={() => { localStorage.removeItem(TOUR_STORAGE_KEY); tour.startTour(); }}
             style={{ display: 'flex', alignItems: 'center', gap: 5, border: '1px solid #cbd5e1', background: '#fff', borderRadius: 6, padding: '4px 10px', fontSize: 11, fontWeight: 700, color: '#64748b', cursor: 'pointer' }}>
@@ -292,7 +328,7 @@ export default function LLMImpactAnalysis({ onVoltagesUpdated, onLoadingChanged,
                 onChange={e => setSubstationVoltage(parseFloat(e.target.value))}
                 style={{ width: 100, cursor: 'pointer' }} />
               <div style={{ background: '#fff', border: `1px solid ${substationVoltage < 0.95 ? '#fca5a5' : substationVoltage > 1.05 ? '#fde68a' : '#cbd5e1'}`, borderRadius: 6, padding: '6px 10px', fontWeight: 800, fontSize: 12, color: substationVoltage < 0.95 ? '#ef4444' : substationVoltage > 1.05 ? '#f59e0b' : '#0f172a', minWidth: 58, textAlign: 'center' }}>
-                {fmt(substationVoltage, 3)}
+                {substationVoltage.toFixed(3)}
               </div>
             </div>
           </div>
@@ -328,7 +364,7 @@ export default function LLMImpactAnalysis({ onVoltagesUpdated, onLoadingChanged,
 
           {/* Replicas */}
           <div id="replicas">
-            <div style={{ color: '#94a3b8', fontSize: 9, fontWeight: 800, marginBottom: 4 }}>Replicas</div>
+            <div style={{ color: '#94a3b8', fontSize: 9, fontWeight: 800, marginBottom: 4 }}>Replicas </div>
             <div style={{ display: 'flex', alignItems: 'center', gap: 6, background: '#fff', border: '1px solid #cbd5e1', borderRadius: 6, padding: '6px 10px' }}>
               <Cpu size={14} color="#64748b" />
               <input type="number" min={1} max={500} value={numReplicas}
@@ -370,7 +406,7 @@ export default function LLMImpactAnalysis({ onVoltagesUpdated, onLoadingChanged,
         </div>
       )}
 
-      {data && !loading && timeSeries.length > 0 && (
+      {data && !loading && (
         <div style={{ padding: '24px', display: 'flex', flexDirection: 'column', gap: 20 }}>
           {/* Trace info banner */}
           <div style={{ background: '#f5f3ff', border: '1px solid #c4b5fd', borderRadius: 8, padding: '10px 16px', display: 'flex', gap: 24, flexWrap: 'wrap', alignItems: 'center' }}>
@@ -385,11 +421,11 @@ export default function LLMImpactAnalysis({ onVoltagesUpdated, onLoadingChanged,
           {/* Timeline scrubber */}
           <div id="timeline-scrubber" style={{ background: '#f8fafc', border: '2px solid #0891b2', borderRadius: 8, padding: '16px 20px' }}>
             <div style={{ fontWeight: 800, fontSize: 12, color: '#0891b2', marginBottom: 12 }}>
-              Time through Power Trace
+             Time through Power Trace
             </div>
             <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 12 }}>
-              <button onClick={() => { setIsPlaying(false); setSelIdx(i => Math.max(0, i - 1)); }} disabled={selIdx === 0}
-                style={{ display: 'flex', alignItems: 'center', gap: 4, cursor: selIdx === 0 ? 'not-allowed' : 'pointer', border: '1px solid #cbd5e1', background: '#fff', borderRadius: 6, padding: '6px 10px', fontSize: 11, fontWeight: 700, color: selIdx === 0 ? '#cbd5e1' : '#0f172a' }}>
+              <button onClick={() => { setIsPlaying(false); setSelIdx(i => Math.max(0, i - 1)); }} disabled={safeSelIdx === 0}
+                style={{ display: 'flex', alignItems: 'center', gap: 4, cursor: safeSelIdx === 0 ? 'not-allowed' : 'pointer', border: '1px solid #cbd5e1', background: '#fff', borderRadius: 6, padding: '6px 10px', fontSize: 11, fontWeight: 700, color: safeSelIdx === 0 ? '#cbd5e1' : '#0f172a' }}>
                 <ChevronLeft size={16} /> PREV
               </button>
               <button onClick={togglePlay} style={{ display: 'flex', alignItems: 'center', gap: 6, background: isPlaying ? '#0c4a6e' : '#0891b2', color: '#fff', border: 'none', borderRadius: 6, padding: '8px 20px', fontWeight: 800, fontSize: 13, cursor: 'pointer', minWidth: 110, justifyContent: 'center' }}>
@@ -407,16 +443,20 @@ export default function LLMImpactAnalysis({ onVoltagesUpdated, onLoadingChanged,
                 ))}
               </div>
               <div style={{ textAlign: 'right', minWidth: 160 }}>
-                <div style={{ fontSize: 18, fontWeight: 800, color: '#0891b2' }}>t = {fmt(snap?.time, 2)}s</div>
+                <div style={{ fontSize: 18, fontWeight: 800, color: '#0891b2' }}>
+                  t = {snap ? safeFixed(snap.time, 2) : '—'}s
+                </div>
                 <div style={{ fontSize: 10, color: '#64748b', marginTop: 2 }}>
-                  {snap ? `${fmt(snap.gpu_power_kW, 0)} kW injected · raw: ${fmt(snap.gpu_power_raw_kW ?? snap.gpu_power_kW, 0)} kW` : ''}
+                  {snap
+                    ? `${safeFixed(snap.gpu_power_kW, 0)} kW injected · raw: ${safeFixed(snap.gpu_power_raw_kW ?? snap.gpu_power_kW, 0)} kW`
+                    : ''}
                 </div>
               </div>
             </div>
             <div style={{ position: 'relative', height: 4, background: '#e2e8f0', borderRadius: 2, marginBottom: 6 }}>
-              <div style={{ position: 'absolute', left: 0, top: 0, height: '100%', width: `${timeSeries.length > 1 ? (selIdx / (timeSeries.length - 1)) * 100 : 0}%`, background: '#0891b2', borderRadius: 2, transition: 'width 0.15s' }} />
+              <div style={{ position: 'absolute', left: 0, top: 0, height: '100%', width: `${timeSeries.length > 1 ? (safeSelIdx / (timeSeries.length - 1)) * 100 : 0}%`, background: '#0891b2', borderRadius: 2, transition: 'width 0.15s' }} />
             </div>
-            <input type="range" min={0} max={Math.max(0, timeSeries.length - 1)} value={selIdx}
+            <input type="range" min={0} max={Math.max(0, timeSeries.length - 1)} value={safeSelIdx}
               onChange={e => { setIsPlaying(false); setSelIdx(+e.target.value); }}
               style={{ width: '100%', height: 6, cursor: 'pointer', accentColor: '#0891b2' }} />
           </div>
@@ -424,15 +464,15 @@ export default function LLMImpactAnalysis({ onVoltagesUpdated, onLoadingChanged,
           {/* GPU power trace chart */}
           {powerChartData.length > 0 && (
             <div style={{ background: '#f5f3ff', border: '1px solid #c4b5fd', borderRadius: 8, padding: '16px 20px' }}>
-              <div style={{ fontWeight: 800, fontSize: 13, color: '#7c3aed', marginBottom: 4 }}>GPU Power Trace (ML.ENERGY H100)</div>
+              <div style={{ fontWeight: 800, fontSize: 13, color: '#7c3aed', marginBottom: 4 }}>GPU Power Trace(ML.ENERGY H100)</div>
               <div style={{ color: '#6d28d9', fontSize: 10, marginBottom: 12 }}>
                 {data.modelLabel} · {data.maxNumSeqs} seqs · {data.numReplicas} replica{data.numReplicas > 1 ? 's' : ''}
               </div>
               <div style={{ height: 120 }}>
-                <ResponsiveContainer width="100%" height="100%" minHeight={80}>
+              <ResponsiveContainer width="100%" height="100%" minHeight={80}>
                   <LineChart data={powerChartData} margin={{ top: 4, right: 20, bottom: 4, left: 10 }}>
                     <XAxis dataKey="t" stroke="#94a3b8" tick={{ fontSize: 9 }} tickFormatter={v => `${v}s`} />
-                    <YAxis stroke="#94a3b8" tick={{ fontSize: 9 }} tickFormatter={v => `${fmt(v, 0)}kW`} />
+                    <YAxis stroke="#94a3b8" tick={{ fontSize: 9 }} tickFormatter={v => `${v.toFixed(0)}kW`} />
                     <ReferenceLine x={snap?.time} stroke="#0891b2" strokeWidth={1.5} opacity={0.7} />
                     <Line type="monotone" dataKey="kw" stroke="#7c3aed" strokeWidth={1.5} dot={false} isAnimationActive={false} />
                   </LineChart>
@@ -444,24 +484,23 @@ export default function LLMImpactAnalysis({ onVoltagesUpdated, onLoadingChanged,
           {/* Summary stats */}
           {(() => {
             const totalViolPct = violStats.length
-              ? (violStats.reduce((s, b) => s + b.under + b.over, 0) / (violStats.length * (data.numSamples || 1)) * 100) : 0;
+              ? (violStats.reduce((s, b) => s + b.under + b.over, 0) / (violStats.length * data.numSamples) * 100) : 0;
             const bussesViolated = violStats.filter(b => b.under + b.over > 0).length;
-            const minV = data.minVoltage ?? 1;
             return (
               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12 }}>
                 <div style={{ background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: 8, padding: '12px 14px' }}>
                   <div style={{ color: '#64748b', fontSize: 9, fontWeight: 800, marginBottom: 6 }}>DURATION</div>
-                  <div style={{ color: '#0f172a', fontSize: 22, fontWeight: 800, lineHeight: 1 }}>{fmt(data.duration, 1)}s</div>
+                  <div style={{ color: '#0f172a', fontSize: 22, fontWeight: 800, lineHeight: 1 }}>{safeFixed(data.duration, 1)}s</div>
                   <div style={{ color: '#94a3b8', fontSize: 10, marginTop: 4 }}>{data.numSamples} samples</div>
                 </div>
-                <div style={{ background: minV < 0.95 ? '#fef2f2' : '#f8fafc', border: `1px solid ${minV < 0.95 ? '#fca5a5' : '#e2e8f0'}`, borderRadius: 8, padding: '12px 14px' }}>
-                  <div style={{ color: minV < 0.95 ? '#dc2626' : '#64748b', fontSize: 9, fontWeight: 800, marginBottom: 6 }}>WORST VOLTAGE</div>
-                  <div style={{ color: minV < 0.95 ? '#ef4444' : '#0f172a', fontSize: 22, fontWeight: 800, lineHeight: 1 }}>{fmt(minV, 4)}</div>
-                  <div style={{ color: '#94a3b8', fontSize: 10, marginTop: 4 }}>{minV < 0.95 ? '⚠ Under-voltage' : 'Within bounds'}</div>
+                <div style={{ background: data.minVoltage < 0.95 ? '#fef2f2' : '#f8fafc', border: `1px solid ${data.minVoltage < 0.95 ? '#fca5a5' : '#e2e8f0'}`, borderRadius: 8, padding: '12px 14px' }}>
+                  <div style={{ color: data.minVoltage < 0.95 ? '#dc2626' : '#64748b', fontSize: 9, fontWeight: 800, marginBottom: 6 }}>WORST VOLTAGE</div>
+                  <div style={{ color: data.minVoltage < 0.95 ? '#ef4444' : '#0f172a', fontSize: 22, fontWeight: 800, lineHeight: 1 }}>{safeFixed(data.minVoltage, 4)}</div>
+                  <div style={{ color: '#94a3b8', fontSize: 10, marginTop: 4 }}>{data.minVoltage < 0.95 ? '⚠ Under-voltage' : 'Within bounds'}</div>
                 </div>
                 <div style={{ background: totalViolPct > 0 ? '#fef2f2' : '#f0fdf4', border: `1px solid ${totalViolPct > 0 ? '#fca5a5' : '#bbf7d0'}`, borderRadius: 8, padding: '12px 14px' }}>
                   <div style={{ color: totalViolPct > 0 ? '#dc2626' : '#166534', fontSize: 9, fontWeight: 800, marginBottom: 6 }}>VIOLATION RATE</div>
-                  <div style={{ color: totalViolPct > 0 ? '#ef4444' : '#16a34a', fontSize: 22, fontWeight: 800, lineHeight: 1 }}>{fmt(totalViolPct, 1)}%</div>
+                  <div style={{ color: totalViolPct > 0 ? '#ef4444' : '#16a34a', fontSize: 22, fontWeight: 800, lineHeight: 1 }}>{safeFixed(totalViolPct, 1)}%</div>
                   <div style={{ color: '#94a3b8', fontSize: 10, marginTop: 4 }}>{bussesViolated} of 13 buses</div>
                 </div>
                 <div style={{ background: '#ecfeff', border: '2px solid #0891b2', borderRadius: 8, padding: '12px 14px' }}>
@@ -471,7 +510,7 @@ export default function LLMImpactAnalysis({ onVoltagesUpdated, onLoadingChanged,
                     <span style={{ fontSize: 12 }}>{BUS_INFO[targetBus]?.name}</span>
                   </div>
                   <div style={{ color: '#0891b2', fontSize: 10, marginTop: 4 }}>
-                    GPU Cluster size: {data.numReplicas * data.numGpus}
+                   GPU Cluster size: {data.numReplicas * data.numGpus} 
                   </div>
                 </div>
               </div>
@@ -491,7 +530,7 @@ export default function LLMImpactAnalysis({ onVoltagesUpdated, onLoadingChanged,
               </div>
             </div>
             <div style={{ height: 220 }}>
-              <ResponsiveContainer width="100%" height="100%" minHeight={80}>
+            <ResponsiveContainer width="100%" height="100%" minHeight={80}>
                 <BarChart data={violStats} margin={{ top: 8, right: 20, bottom: 20, left: 10 }}>
                   <XAxis dataKey="bus" stroke="#64748b" tick={{ fontSize: 10 }} tickFormatter={v => `B${v}`}
                     label={{ value: 'Bus Number', position: 'insideBottom', offset: -12, fontSize: 10, fill: '#64748b' }} />
@@ -515,6 +554,8 @@ export default function LLMImpactAnalysis({ onVoltagesUpdated, onLoadingChanged,
               const hasViolations = bus.violations > 0;
               const borderColor = bus.isTarget ? '#0891b2' : hasViolations ? '#ef4444' : '#e2e8f0';
               const bgColor     = bus.isTarget ? '#ecfeff'  : hasViolations ? '#fef2f2'  : '#ffffff';
+              // Safe voltage value for this bus at current snap
+              const busV = snapVoltage(snap, bus.bus - 1);
               return (
                 <div key={bus.bus} style={{ background: bgColor, border: `2px solid ${borderColor}`, borderRadius: 8, padding: '12px' }}>
                   <div style={{ marginBottom: 8 }}>
@@ -524,7 +565,7 @@ export default function LLMImpactAnalysis({ onVoltagesUpdated, onLoadingChanged,
                       </span>
                       {hasViolations && (
                         <span style={{ background: '#fef2f2', color: '#ef4444', fontSize: 9, fontWeight: 800, padding: '2px 6px', borderRadius: 4, border: '1px solid #fca5a5' }}>
-                          {fmt((bus.violations / (data.numSamples || 1)) * 100, 1)}% Violations
+                          {safeFixed((bus.violations / data.numSamples) * 100, 1)}% Violations
                         </span>
                       )}
                     </div>
@@ -533,12 +574,12 @@ export default function LLMImpactAnalysis({ onVoltagesUpdated, onLoadingChanged,
                       {bus.isTarget && <span style={{ marginLeft: 5, background: '#0891b2', color: '#fff', fontSize: 8, fontWeight: 800, padding: '1px 5px', borderRadius: 3 }}>DATA CENTER</span>}
                     </div>
                     <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 9, color: '#94a3b8' }}>
-                      <span>Min: {fmt(bus.minV, 4)}</span>
-                      <span>Max: {fmt(bus.maxV, 4)}</span>
+                      <span>Min: {safeFixed(bus.minV, 4)}</span>
+                      <span>Max: {safeFixed(bus.maxV, 4)}</span>
                     </div>
                   </div>
                   <div style={{ height: 100 }}>
-                    <ResponsiveContainer width="100%" height="100%" minHeight={80}>
+                  <ResponsiveContainer width="100%" height="100%" minHeight={80}>
                       <LineChart data={bus.series} margin={{ top: 4, right: 4, bottom: 0, left: 0 }}
                         onClick={(e: any) => { const idx = e?.activePayload?.[0]?.payload?._i; if (idx != null) { setIsPlaying(false); setSelIdx(idx); } }}
                         style={{ cursor: 'pointer' }}>
@@ -553,9 +594,9 @@ export default function LLMImpactAnalysis({ onVoltagesUpdated, onLoadingChanged,
                       </LineChart>
                     </ResponsiveContainer>
                   </div>
-                  {snap && (
-                    <div style={{ marginTop: 6, textAlign: 'center', fontSize: 11, fontWeight: 800, color: (snap.voltages?.[bus.bus-1] ?? 1) < 0.95 ? '#ef4444' : (snap.voltages?.[bus.bus-1] ?? 1) > 1.05 ? '#f59e0b' : '#16a34a' }}>
-                      t={fmt(snap.time, 1)}s · {fmt(snap.voltages?.[bus.bus-1], 4)} p.u.
+                  {snap && busV != null && (
+                    <div style={{ marginTop: 6, textAlign: 'center', fontSize: 11, fontWeight: 800, color: busV < 0.95 ? '#ef4444' : busV > 1.05 ? '#f59e0b' : '#16a34a' }}>
+                      t={safeFixed(snap.time, 1)}s · {safeFixed(busV, 4)} p.u.
                     </div>
                   )}
                 </div>
