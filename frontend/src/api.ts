@@ -3,6 +3,7 @@
 export const API_URL = import.meta.env.VITE_API_URL ?? "https://gpu2grid-live.hf.space";
 
 
+
 export async function wakeBackend(): Promise<void> {
   for (let i = 0; i < 10; i++) {
     try {
