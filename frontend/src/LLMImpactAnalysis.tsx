@@ -213,47 +213,76 @@ export default function LLMImpactAnalysis({ onVoltagesUpdated, onLoadingChanged,
     setSelIdx(0); setIsPlaying(false);
     onLoadingChanged?.(true);
   
-    try {
-      const res = await fetch(`${API_URL}/api/llm-impact`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          targetBus,
-          modelLabel:        selectedModel,
-          numGpus:           currentModel?.numGpus ?? 1,
-          maxNumSeqs:        selectedBatch,
-          numReplicas,
-          substationVoltage,
-          sampleInterval:    1,
-        }),
+    const accumulated: TimestepData[] = [];
+    const wsUrl = API_URL.replace('http', 'ws');
+    const ws = new WebSocket(`${wsUrl}/ws/sim-stream`);
+  
+    ws.onopen = () => {
+      ws.send(JSON.stringify({
+        targetBus,
+        modelLabel:        selectedModel,
+        numGpus:           currentModel?.numGpus ?? 1,
+        maxNumSeqs:        selectedBatch,
+        numReplicas,
+        substationVoltage,
+        sampleInterval:    1,
+        durationS:         300,
+      }));
+    };
+  
+    ws.onmessage = (evt) => {
+      const tick = JSON.parse(evt.data);
+      if (tick.error) { setError(tick.error); setLoading(false); onLoadingChanged?.(false); ws.close(); return; }
+      if (tick.done)  { ws.close(); return; }
+  
+      // Build a TimestepData-compatible object from the streaming tick
+      const row: TimestepData = {
+        time:               tick.time,
+        gpu_power_W:        tick.gpu_power_kW * 1000,
+        gpu_power_kW:       tick.gpu_power_kW,
+        gpu_power_raw_kW:   tick.gpu_power_raw_kW,
+        gpu_reactive_kVAR:  tick.gpu_power_kW * 0.329,
+        voltages:           tick.voltages ?? [],
+        min_voltage:        tick.min_voltage ?? 1.0,
+        max_voltage:        tick.max_voltage ?? 1.0,
+        target_bus_voltage: tick.target_bus_voltage ?? 1.0,
+        total_load_kW:      tick.gpu_power_kW,
+      };
+      accumulated.push(row);
+  
+      // Show first tick immediately — removes the blank wait
+      if (accumulated.length === 1) {
+        setLoading(false);
+        onLoadingChanged?.(false);
+      }
+  
+      // Update data incrementally so charts paint as ticks arrive
+      setData(prev => {
+        const base = prev ?? {
+          numSamples: 0, targetBus, modelLabel: selectedModel,
+          numGpus: currentModel?.numGpus ?? 1, maxNumSeqs: selectedBatch,
+          numReplicas, duration: 0,
+          minVoltage: 1.0, maxVoltage: 1.0,
+          avgGpuPower: 0, peakGpuPower: 0, timeSeries: [],
+        };
+        return {
+          ...base,
+          numSamples:   accumulated.length,
+          duration:     row.time,
+          minVoltage:   Math.min(base.minVoltage, row.min_voltage),
+          maxVoltage:   Math.max(base.maxVoltage, row.max_voltage),
+          peakGpuPower: Math.max(base.peakGpuPower, row.gpu_power_W),
+          avgGpuPower:  accumulated.reduce((s, r) => s + r.gpu_power_W, 0) / accumulated.length,
+          timeSeries:   accumulated,
+        };
       });
-      if (!res.ok) throw new Error(await res.text() || `HTTP ${res.status}`);
-      const result: AnalysisData = await res.json();
-
-      // Validate response shape before setting state
-      if (!result || !Array.isArray(result.timeSeries) || result.timeSeries.length === 0) {
-        throw new Error('Invalid response from server: empty or malformed timeSeries');
-      }
-
-      setSelIdx(0);
-      setData(result);
-
-      const peakStep = result.timeSeries.reduce((a, b) =>
-        (b.gpu_power_kW ?? 0) > (a.gpu_power_kW ?? 0) ? b : a
-      );
-      if (peakStep?.voltages?.length) {
-        onVoltagesUpdated?.(
-          peakStep.voltages,
-          `${result.modelLabel} peak — ${safeFixed(peakStep.gpu_power_kW, 0)} kW on Bus ${targetBus}`,
-          targetBus
-        );
-      }
-    } catch (e) {
-      setError((e as Error).message);
-    } finally {
+    };
+  
+    ws.onerror = () => {
+      setError('WebSocket connection failed');
       setLoading(false);
       onLoadingChanged?.(false);
-    }
+    };
   };
 
   const violStats = useMemo(() => {
@@ -584,8 +613,15 @@ export default function LLMImpactAnalysis({ onVoltagesUpdated, onLoadingChanged,
                         onClick={(e: any) => { const idx = e?.activePayload?.[0]?.payload?._i; if (idx != null) { setIsPlaying(false); setSelIdx(idx); } }}
                         style={{ cursor: 'pointer' }}>
                         <XAxis dataKey="t" hide />
-                        <YAxis domain={([dataMin, dataMax]: any) => { const pad = (dataMax - dataMin) * 0.1 || 0.02; return [Math.min(dataMin - pad, 0.92), Math.max(dataMax + pad, 1.06)]; }} hide />
-                        <Tooltip content={<MiniTooltip />} />
+                        <YAxis
+  domain={([dataMin, dataMax]) => {
+    const range = dataMax - dataMin;
+    const pad = Math.max(range * 0.2, 0.005);
+    return [dataMin - pad, dataMax + pad];
+  }}
+  hide
+/>
+                <Tooltip content={<MiniTooltip />} />
                         <ReferenceLine y={0.95} stroke="#ef4444" strokeDasharray="3 3" strokeWidth={1} />
                         <ReferenceLine y={1.05} stroke="#f59e0b" strokeDasharray="3 3" strokeWidth={1} />
                         <ReferenceLine y={1.0}  stroke="#cbd5e1" strokeWidth={1} />

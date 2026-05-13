@@ -6,3 +6,5 @@ pandas
 opendssdirect.py
 matplotlib
 scipy
+openg2g[opendss]==0.2.0.post1
+websockets

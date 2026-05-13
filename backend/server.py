@@ -7,7 +7,7 @@ Uses GPU power traces and  workloads to model howAI inference/training affects g
 """
 
 
-from __future__ import annotations
+
 from fractions import Fraction
 from pathlib import Path
 import subprocess, tempfile, os, uvicorn, threading, math, json, hashlib
@@ -17,16 +17,21 @@ from fastapi import FastAPI, HTTPException, Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional
+from fastapi import WebSocket, WebSocketDisconnect
 
 
 from  openg2g.coordinator import Coordinator
 
-from  openg2g.datacenter.config import (
-    DatacenterConfig, InferenceModelSpec,
-    PowerAugmentationConfig, InferenceRamp, TrainingRun,
+from openg2g.datacenter.config import (
+    DatacenterConfig,
+    InferenceModelSpec,
+    PowerAugmentationConfig,
+    TrainingRun,
+    ReplicaSchedule,
 )
+
 from  openg2g.datacenter.offline import OfflineDatacenter, OfflineWorkload
-from  openg2g.datacenter.workloads.inference import InferenceData, MLEnergySource
+from openg2g.datacenter.workloads.inference import InferenceData
 from  openg2g.datacenter.workloads.training import TrainingTrace, TrainingTraceParams
 from  openg2g.grid.opendss import OpenDSSGrid
 from  openg2g.grid.config import TapPosition
@@ -72,22 +77,42 @@ BUSES_ORDERED = [BUS_INDEX_TO_NAME[i] for i in range(1, 14)]
 #read files 
 _config_raw = json.loads(CONFIG_PATH.read_text())
 _MODELS     = tuple(InferenceModelSpec(**m) for m in _config_raw["models"])
-_SOURCES    = {s["model_label"]: MLEnergySource(**s) for s in _config_raw["data_sources"]}
 _DC_CONFIG  = DatacenterConfig(gpus_per_server=8, base_kw_per_phase=500.0)
+
 
 if _config_raw.get("data_dir"):
     _DATA_DIR = Path(_config_raw["data_dir"])
 else:
-    blob      = json.dumps(sorted(_config_raw["data_sources"],
-                                  key=lambda s: s["model_label"]),
-                           sort_keys=True).encode()
-    _DATA_DIR = Path(__file__).parent / "data/offline" / hashlib.sha256(blob).hexdigest()[:16]
-
+    _DATA_DIR = Path(__file__).parent / "data/specs"
+    
+   
 # Load traces_summary.csv once at startup so we can quickly look up trace files
 _TRACES_SUMMARY_PATH = _DATA_DIR / "traces_summary.csv"
 
 #Cached dataframe of available GPU power traces
 _traces_df: pd.DataFrame | None = None
+
+
+TAP_STEP = 0.00625
+INITIAL_TAPS = TapPosition(
+    a=1.0 + 14 * TAP_STEP,
+    b=1.0 +  6 * TAP_STEP,
+    c=1.0 + 15 * TAP_STEP,
+)
+
+# Rescaled to fit in 300s window (original is 3600s, we compress ~12x)
+TAP_CHANGE_SCHEDULE = (
+    TapPosition(
+        a=1.0 + 16 * TAP_STEP,
+        b=1.0 +  6 * TAP_STEP,
+        c=1.0 + 17 * TAP_STEP,
+    ).at(t=75)   # was 1500s → 75s at 12x compression
+    | TapPosition(
+        a=1.0 + 10 * TAP_STEP,
+        b=1.0 +  6 * TAP_STEP,
+        c=1.0 + 10 * TAP_STEP,
+    ).at(t=200)  # was 3300s → 200s at 12x compression
+)
 
 
 """
@@ -136,43 +161,64 @@ _load_traces_index()  # load at startup
 
 """Datacenter workload (baseline)"""
 def _build_dc(scale: float = 1.0, duration_s: int = 300) -> OfflineDatacenter:
-    scaled_models = tuple(
-        InferenceModelSpec(
-            model_label        = m.model_label,
-            num_replicas       = max(1, int(m.num_replicas * scale)),
-            gpus_per_replica   = m.gpus_per_replica,
-            initial_batch_size = m.initial_batch_size,
-            itl_deadline_s     = m.itl_deadline_s,
-        ) for m in _MODELS
-    )
-    inference_data = InferenceData.ensure(_DATA_DIR, scaled_models, _SOURCES, dt_s=0.1)
+
+    df = _load_traces_index()
+    first_row = df.iloc[0]
+    
+    first_model = tuple(m for m in _MODELS if m.model_label == first_row["model_label"])
+    inference_data = InferenceData.load(_DATA_DIR, first_model)
+
     training_trace = TrainingTrace.ensure(
-        _DATA_DIR / "training_trace.csv", TrainingTraceParams()
+        _DATA_DIR / "training_trace.csv",
+        TrainingTraceParams(),
     )
-    t0 = min(40.0,  duration_s * 0.13)
+
+    t0 = min(40.0, duration_s * 0.13)
     t1 = min(140.0, duration_s * 0.47)
-    t2 = min(150.0, duration_s * 0.50)
-    t3 = min(220.0, duration_s * 0.73)
+
+    replica_schedules = {}
+
+    for m in _MODELS:
+
+        initial_replicas = max(1, int(scale * 8))
+
+        reduced_replicas = max(1, int(initial_replicas * 0.25))
+
+        replica_schedules[m.model_label] = (
+            ReplicaSchedule(initial=initial_replicas)
+            .ramp_to(
+                reduced_replicas,
+                t_start=min(150.0, duration_s * 0.50),
+                t_end=min(220.0, duration_s * 0.73),
+            )
+        )
 
     workload = OfflineWorkload(
-        inference_data  = inference_data,
-        training        = TrainingRun(
-            n_gpus               = max(1, int(24 * scale)),
-            trace                = training_trace,
-            target_peak_W_per_gpu= 400.0,
-        ).at(t_start=t0, t_end=t1),
-        inference_ramps = InferenceRamp(
-            target=min(1.0, 0.25 * scale)
-        ).at(t_start=t2, t_end=t3),
-    )
-    return OfflineDatacenter(
-        _DC_CONFIG, workload, dt_s=Fraction(1, 10), seed=0,
-        power_augmentation=PowerAugmentationConfig(
-            amplitude_scale_range=(0.88, 1.12),
-            noise_fraction=0.04,
+        inference_data=inference_data,
+        replica_schedules=replica_schedules,
+
+        training=TrainingRun(
+            n_gpus=max(1, int(24 * scale)),
+            trace=training_trace,
+            target_peak_W_per_gpu=400.0,
+        ).at(
+            t_start=t0,
+            t_end=t1,
         ),
     )
 
+    return OfflineDatacenter(
+    _DC_CONFIG,
+    workload,
+    dt_s=Fraction(1, 10),
+    seed=0,
+    name="baseline",
+    total_gpu_capacity=1000,
+    power_augmentation=PowerAugmentationConfig(
+        amplitude_scale_range=(0.88, 1.12),
+        noise_fraction=0.04,
+    ),
+)
 
 
 """
@@ -190,52 +236,49 @@ def _build_dc_from_real_trace(
 
     power_W = _get_trace_power(model_label, num_gpus, max_num_seqs, num_replicas)
 
-    # Trim or repeat trace to match requested duration at dt=0.1s
     target_steps = int(duration_s / 0.1)
     if len(power_W) < target_steps:
-        # Repeat trace to fill duration
         repeats = math.ceil(target_steps / len(power_W))
         power_W = (power_W * repeats)[:target_steps]
     else:
         power_W = power_W[:target_steps]
 
-    # Build InferenceData with a single model replica matching the trace GPUs
-    model_spec = InferenceModelSpec(
-        model_label        = model_label,
-        num_replicas       = num_replicas,
-        gpus_per_replica   = num_gpus,
-        initial_batch_size = max_num_seqs,
-        itl_deadline_s     = 0.08,
-    )
-    source = _SOURCES.get(model_label)
-    if source is None:
-        # Fall back to first available source if model not in config
-        source = next(iter(_SOURCES.values()))
+    df = _load_traces_index()
+    row = df[df["model_label"] == model_label].iloc[0]
 
-    inference_data = InferenceData.ensure(
-        _DATA_DIR, (model_spec,), {model_label: source}, dt_s=0.1
+    model_tuple = tuple(m for m in _MODELS if m.model_label == model_label)
+    inference_data = InferenceData.load(_DATA_DIR, model_tuple)
+
+    workload = OfflineWorkload(
+        inference_data=inference_data,
+        replica_schedules={
+            model_label: ReplicaSchedule(initial=num_replicas)
+        },
     )
 
-    workload = OfflineWorkload(inference_data=inference_data)
+    # ← compute actual GPU count and add headroom
+    actual_gpu_count = num_replicas * num_gpus
+    gpu_capacity     = max(1000, actual_gpu_count * 2)
 
     dc = OfflineDatacenter(
         _DC_CONFIG, workload, dt_s=Fraction(1, 10), seed=0,
+        name=model_label.replace(".", "-"),
+        total_gpu_capacity=gpu_capacity,   # ← was hardcoded 1000
         power_augmentation=PowerAugmentationConfig(
-            amplitude_scale_range=(1.0, 1.0),  # no augmentation — use real trace as-is
+            amplitude_scale_range=(1.0, 1.0),
             noise_fraction=0.0,
         ),
     )
     return dc, power_W
 
-
-
 """Create IEEE 13-bus grid with datacenter connection."""
 def _build_grid(tap_pu: float, dc_bus: str) -> OpenDSSGrid:
     return OpenDSSGrid(
-        dss_case_dir=str(DSS_DIR), dss_master_file=DSS_MASTER,
-        dc_bus=dc_bus, dc_bus_kv=4.16,
-        power_factor=_DC_CONFIG.power_factor,
-        dt_s=Fraction(1), connection_type="wye",
+        dss_case_dir=str(DSS_DIR),
+        dss_master_file=DSS_MASTER,
+        dt_s=Fraction(1),
+        source_pu=tap_pu,
+        initial_tap_position=INITIAL_TAPS,  
     )
 
 
@@ -245,22 +288,24 @@ def _make_tap(v: float):
 
 """Run  datacenter + grid simulation."""
 def _run(dc, grid, tap_pu, dc_bus, duration_s):
+    grid.attach_dc(dc, bus=dc_bus, connection_type="wye", power_factor=_DC_CONFIG.power_factor)
     coord = Coordinator(
-        datacenter=dc, grid=grid,
+        datacenters=[dc],
+        grid=grid,
         controllers=[TapScheduleController(
-            schedule=_make_tap(tap_pu), dt_s=Fraction(1)
+            schedule=TAP_CHANGE_SCHEDULE,  # ← real schedule
+            dt_s=Fraction(1)
         )],
         total_duration_s=duration_s,
-        dc_bus=dc_bus,
     )
     return coord.run()
-
 
 """
     Runs one full simulation job (datacenter + grid) in a worker process
     and returns results for the API.
     """
 def _run_full(req_dict: dict) -> dict:
+
 
     dc_bus   = BUS_INDEX_TO_NAME.get(req_dict["targetBus"], "671")
     replicas = max(1, req_dict["numReplicas"])
@@ -328,6 +373,7 @@ def _run_full(req_dict: dict) -> dict:
 """Get per-bus voltage (worst phase per bus)."""
 def _voltages(gs) -> list[float]:
     result = []
+    none_count = 0
     for name in BUSES_ORDERED:
         try:
             tp   = gs.voltages[name]
@@ -337,11 +383,14 @@ def _voltages(gs) -> list[float]:
         except Exception as e:
             logger.debug(f"Bus {name} voltage unavailable: {e}")
             result.append(None)
-    known = [v for v in result if v is not None]
-    avg   = sum(known) / len(known) if known else 1.0
-    result = [v if v is not None else avg for v in result]
-    logger.debug(f"Voltages: {[round(v,4) for v in result]}")
-    return result
+    
+    none_count = sum(1 for v in result if v is None)
+    if none_count > 3:
+        logger.warning(f"OpenDSS convergence failure: {none_count}/13 buses returned None")
+    
+    known  = [v for v in result if v is not None]
+    avg    = sum(known) / len(known) if known else 1.0
+    return [v if v is not None else avg for v in result]
 
 
 # ── FastAPI────────────────────────────────────────────────────────────────
@@ -349,11 +398,10 @@ def _voltages(gs) -> list[float]:
 app = FastAPI()
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["https://gpu2grid.io", "http://localhost:5173", "http://localhost:5174"],
-    allow_credentials=True,
+    allow_origins=["*"],
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
-    allow_origin_regex=".*",
 )
 
 
@@ -471,6 +519,116 @@ async def heatmap(req: HeatmapRequest):
     return Response(content=png, media_type="image/png")
 
 
+    
+    
+    
+    
+def _serialize_tick(tick, req_dict: dict, raw_power_W: list[float]) -> dict:
+    """Serialize one TickOutput to a small JSON-safe dict for the frontend."""
+    t = tick.t_s
+
+    # Grid voltages (may be None if grid didn't tick this step)
+    voltages = None
+    min_v = max_v = target_v = None
+    if tick.grid_state is not None:
+        voltages = _voltages(tick.grid_state)
+        min_v = min(voltages)
+        max_v = max(voltages)
+        target_v = voltages[req_dict["targetBus"] - 1]
+
+    # DC power (sum all sites)
+    kw = 0.0
+    batch_by_model: dict[str, int] = {}
+    for dc_name, ds in tick.dc_states.items():
+        pw = ds.power_w
+        kw += float((pw.a + pw.b + pw.c) / 1000)
+        if hasattr(ds, "batch_size_by_model"):
+            batch_by_model.update(ds.batch_size_by_model)
+    if math.isnan(kw):
+        kw = 0.0
+
+    trace_idx = min(int(t / 0.1), len(raw_power_W) - 1) if raw_power_W else 0
+    raw_kw = raw_power_W[trace_idx] / 1000.0 if raw_power_W else kw
+
+    events = [{"type": e.event_type, "data": e.data} for e in tick.sim_events]
+
+    return {
+        "time":               float(t),
+        "gpu_power_kW":       kw,
+        "gpu_power_raw_kW":   raw_kw,
+        "active_gpus":        req_dict["numReplicas"] * req_dict["numGpus"],
+        "batch_by_model":     batch_by_model,
+        "voltages":           voltages,
+        "min_voltage":        min_v,
+        "max_voltage":        max_v,
+        "target_bus_voltage": target_v,
+        "sim_events":         events,
+    }
+
+
+def _run_streaming(req_dict: dict):
+    """Generator: builds coordinator and yields serialized tick dicts."""
+    dc_bus   = BUS_INDEX_TO_NAME.get(req_dict["targetBus"], "671")
+    replicas = max(1, req_dict["numReplicas"])
+
+    dc, raw_power_W = _build_dc_from_real_trace(
+        model_label  = req_dict["modelLabel"],
+        num_gpus     = req_dict["numGpus"],
+        max_num_seqs = req_dict["maxNumSeqs"],
+        num_replicas = replicas,
+        duration_s   = req_dict["durationS"],
+    )
+    grid = _build_grid(req_dict["substationVoltage"], dc_bus)
+    grid.attach_dc(dc, bus=dc_bus, connection_type="wye",
+                   power_factor=_DC_CONFIG.power_factor)
+
+    coord = Coordinator(
+        datacenters=[dc],
+        grid=grid,
+        
+        controllers=[TapScheduleController(
+                schedule=TAP_CHANGE_SCHEDULE,  
+            dt_s=Fraction(1),
+        )],
+        total_duration_s=req_dict["durationS"],
+    )
+
+    step     = max(1, req_dict["sampleInterval"])
+    tick_num = 0
+    try:
+        for tick in coord.run_iter():
+            if tick_num % step == 0:
+                yield _serialize_tick(tick, req_dict, raw_power_W)
+            tick_num += 1
+    finally:
+        coord.stop()
+
+@app.websocket("/ws/sim-stream")
+async def sim_stream(ws: WebSocket):
+    await ws.accept()
+    try:
+        req_dict = await ws.receive_json()
+        req = LLMImpactRequest(**req_dict)
+        logger.info(f"WS stream: {req.modelLabel} bus={req.targetBus}")
+
+        # Run full simulation in process pool (separate process = safe for OpenDSS)
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(_pool, _run_full, req.dict())
+
+        # Stream results tick by tick from the completed result
+        for row in result["timeSeries"]:
+            await ws.send_json(row)
+
+        await ws.send_json({"done": True})
+
+    except WebSocketDisconnect:
+        logger.info("WS client disconnected")
+    except Exception as e:
+        logger.exception("WS stream failed")
+        try:
+            await ws.send_json({"error": str(e)})
+        except Exception:
+            pass
 if __name__ == "__main__":
     logger.info("=" * 70)
     logger.info(f"Data dir: {_DATA_DIR} ready={_DATA_DIR.exists()}")
@@ -480,4 +638,4 @@ if __name__ == "__main__":
         logger.info(f"Models: {models}")
         logger.info(f"Traces: {len(df)} configurations")
     logger.info("=" * 70)
-    uvicorn.run("server:app", host="0.0.0.0", port=8080, workers=1, log_level="info")
+    uvicorn.run("server:app", host="0.0.0.0", port=8080, workers=1, log_level="info", ws_ping_interval=None)

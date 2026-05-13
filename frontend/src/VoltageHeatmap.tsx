@@ -129,7 +129,7 @@ useEffect(() => {
             </div>
             
             <div style={{ fontSize: '22px', fontWeight: 900, color: statusColor, lineHeight: 1 }}>
-              {v?.toFixed(4)} <span style={{ fontSize: '12px', fontWeight: 600 }}>p.u.</span>
+              {v?.toFixed(3)} <span style={{ fontSize: '12px', fontWeight: 600 }}>p.u.</span>
             </div>
             
             <div style={{ fontSize: '10px', color: '#94a3b8', marginTop: 4 }}>
