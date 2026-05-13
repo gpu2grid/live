@@ -8,6 +8,8 @@ import matplotlib.patches as mpatches
 from matplotlib.lines import Line2D
 import matplotlib.cm as cm
 import matplotlib.colors as mcolors
+import logging
+logger = logging.getLogger(__name__)
 
 
 
@@ -196,12 +198,13 @@ def generate_heatmap(voltages, output_path, vmin=0.92, vmax=1.06, map_image="13b
     plt.rcParams['svg.fonttype'] = 'none'
     plt.savefig(output_path, format='svg', bbox_inches='tight', dpi=150, facecolor='white')
     plt.close()
-    print(f"[ok] saved {output_path}")
+    logger.info(f"Saved heatmap: {output_path}")
 
 
 if __name__ == "__main__":
     if len(sys.argv) < 15:
-        print("Usage: generate_heatmap.py <output.png> <v1> <v2> ... <v13> [dc_bus_idx]")
+        logger.info(f"Usage: generate_heatmap.py <output.png> <v1> <v2> ... <v13> [dc_bus_idx]")
+ 
         sys.exit(1)
     out      = sys.argv[1]
     volts    = [float(v) for v in sys.argv[2:15]]

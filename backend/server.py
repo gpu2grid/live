@@ -33,29 +33,25 @@ from  openg2g.grid.config import TapPosition
 from  openg2g.controller.tap_schedule import TapScheduleController
 from  openg2g.metrics.voltage import compute_allbus_voltage_stats
 
-import asyncio, uuid, time
+import logging
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
+)
+logger = logging.getLogger(__name__)
+
+
+
+import asyncio, time
 from concurrent.futures import ProcessPoolExecutor
 
-import sqlite3, json
+import json
 
-conn = sqlite3.connect("jobs.db", check_same_thread=False, timeout=30)
-conn.execute("PRAGMA journal_mode=WAL;")
-
-
-# create table to track background simulation jobs
-conn.execute("""
-CREATE TABLE IF NOT EXISTS jobs (
-    id TEXT PRIMARY KEY,
-    status TEXT,
-    result TEXT,
-    error TEXT
-)
-""")
-conn.commit()
 
 #currently set to 2 for free tier at hf
 _pool        = ProcessPoolExecutor(max_workers=2)  
-_jobs: dict  = {}
+
 _start_time  = time.time()
 
 
@@ -134,7 +130,7 @@ def _get_trace_power(model_label: str, num_gpus: int, max_num_seqs: int,
     return [p * num_replicas for p in power_W]
 
 
-print(f"  [startup] data dir: {_DATA_DIR}  exists={_DATA_DIR.exists()}")
+logger.info(f"Data dir: {_DATA_DIR} exists={_DATA_DIR.exists()}")
 _load_traces_index()  # load at startup
 
 
@@ -330,7 +326,7 @@ def _run_full(req_dict: dict) -> dict:
     
 
 """Get per-bus voltage (worst phase per bus)."""
-def _voltages(gs, debug=False) -> list[float]:
+def _voltages(gs) -> list[float]:
     result = []
     for name in BUSES_ORDERED:
         try:
@@ -338,13 +334,13 @@ def _voltages(gs, debug=False) -> list[float]:
             vals = [float(v) for v in [tp.a, tp.b, tp.c]
                     if not math.isnan(float(v)) and 0.5 < float(v) < 1.5]
             result.append(min(vals) if vals else None)
-        except Exception:
+        except Exception as e:
+            logger.debug(f"Bus {name} voltage unavailable: {e}")
             result.append(None)
     known = [v for v in result if v is not None]
     avg   = sum(known) / len(known) if known else 1.0
     result = [v if v is not None else avg for v in result]
-    if debug:
-        print(f"  [V] {[round(v,4) for v in result]}")
+    logger.debug(f"Voltages: {[round(v,4) for v in result]}")
     return result
 
 
@@ -390,42 +386,9 @@ def health():
 
 
 
-@app.get("/api/status")
-def status():
-    active = conn.execute(
-        "SELECT COUNT(*) FROM jobs WHERE status='pending'"
-    ).fetchone()[0]
 
-    total = conn.execute(
-        "SELECT COUNT(*) FROM jobs"
-    ).fetchone()[0]
-
-    return {
-        "active_jobs": active,
-        "total_jobs": total,
-        "workers": _pool._max_workers,
-    }
     
     
-
-@app.get("/api/job/{job_id}")
-def get_job(job_id: str):
-    row = conn.execute(
-        "SELECT status, result, error FROM jobs WHERE id=?",
-        (job_id,)
-    ).fetchone()
-
-    if not row:
-        raise HTTPException(404, "Job not found")
-
-    status, result, error = row
-
-    if status == "done":
-        return {"status": status, "result": json.loads(result)}
-    elif status == "error":
-        return {"status": status, "detail": error}
-    else:
-        return {"status": status}
 
 
 """Return available traces"""
@@ -459,18 +422,18 @@ def list_traces():
 """Baseline grid simulation, no workload"""
 @app.post("/api/powerflow")
 async def powerflow(req: PowerflowRequest):
-    print(f"\nPowerflow v={req.substationVoltage}")
+    logger.info(f"Powerflow request v={req.substationVoltage}")
     try:
         dc   = _build_dc(scale=0.001, duration_s=5)
         grid = _build_grid(req.substationVoltage, "671")
         log  = _run(dc, grid, req.substationVoltage, "671", 5)
-        vs   = _voltages(log.grid_states[-1], debug=True)
-        print(f" min={min(vs):.4f}  max={max(vs):.4f}")
+        vs = _voltages(log.grid_states[-1])
+        logger.info(f"Powerflow result min={min(vs):.4f} max={max(vs):.4f}")
         return {"buses": [{"id": i+1, "voltage": v, "activePower": 0.0,
                             "reactivePower": 0.0} for i, v in enumerate(vs)],
                 "lines": []}
     except Exception as e:
-        import traceback; traceback.print_exc()
+        logger.exception("Powerflow failed")
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -478,34 +441,16 @@ async def powerflow(req: PowerflowRequest):
 """Simulate AI workload impact on grid using GPU traces."""
 @app.post("/api/llm-impact")
 async def llm_impact(req: LLMImpactRequest):
-    job_id = uuid.uuid4().hex
+    logger.info(f"Simulation request: {req.modelLabel} bus={req.targetBus}")
 
-    conn.execute(
-        "INSERT INTO jobs (id, status) VALUES (?, ?)",
-        (job_id, "pending")
-    )
-    conn.commit()
+    try:
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(_pool, _run_full, req.dict())
+        return result
 
-    async def run_and_store():
-        try:
-            loop = asyncio.get_event_loop()
-            result = await loop.run_in_executor(_pool, _run_full, req.dict())
-
-            conn.execute(
-                "UPDATE jobs SET status=?, result=? WHERE id=?",
-                ("done", json.dumps(result), job_id)
-            )
-            conn.commit()
-
-        except Exception as e:
-            conn.execute(
-                "UPDATE jobs SET status=?, error=? WHERE id=?",
-                ("error", str(e), job_id)
-            )
-            conn.commit()
-
-    asyncio.create_task(run_and_store())
-    return {"job_id": job_id}
+    except Exception as e:
+        logger.exception("Simulation failed")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 
@@ -527,13 +472,12 @@ async def heatmap(req: HeatmapRequest):
 
 
 if __name__ == "__main__":
-    print("\n" + "="*70)
-    print("="*70)
-    print(f"   Data:   {_DATA_DIR}  ready={_DATA_DIR.exists()}")
+    logger.info("=" * 70)
+    logger.info(f"Data dir: {_DATA_DIR} ready={_DATA_DIR.exists()}")
     df = _load_traces_index()
     if not df.empty:
         models = df["model_label"].unique().tolist()
-        print(f"   Models: {models}")
-        print(f"   Traces: {len(df)} configurations")
-    print("="*70 + "\n")
+        logger.info(f"Models: {models}")
+        logger.info(f"Traces: {len(df)} configurations")
+    logger.info("=" * 70)
     uvicorn.run("server:app", host="0.0.0.0", port=8080, workers=1, log_level="info")

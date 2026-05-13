@@ -118,9 +118,10 @@ export default function LLMImpactAnalysis({ onVoltagesUpdated, onLoadingChanged,
   // Playback
   const [isPlaying, setIsPlaying] = useState(false);
   const [playSpeed, setPlaySpeed] = useState(2);
+  const timeSeries = data?.timeSeries ?? [];
 
-  const snap  = data?.timeSeries[selIdx] ?? null;
-  const atEnd = data ? selIdx >= data.timeSeries.length - 1 : false;
+  const snap  = timeSeries[selIdx] ?? timeSeries[0] ?? null;
+  const atEnd = selIdx >= (timeSeries.length - 1);
 
   const tour = useTour({ hasData: !!data });
 
@@ -154,7 +155,7 @@ export default function LLMImpactAnalysis({ onVoltagesUpdated, onLoadingChanged,
     const ms = 1000 / playSpeed;
     const id = setInterval(() => {
       setSelIdx(prev => {
-        if (prev >= data.timeSeries.length - 1) { setIsPlaying(false); return prev; }
+        if (prev >= timeSeries.length - 1) { setIsPlaying(false); return prev; }
         return prev + 1;
       });
     }, ms);
@@ -177,7 +178,8 @@ export default function LLMImpactAnalysis({ onVoltagesUpdated, onLoadingChanged,
         targetBus
       );
     }
-  }, [selIdx, snap]);
+  }, [selIdx]); 
+
 
   const handleReset = () => {
     setData(null); setError(null); setSelIdx(0); setIsPlaying(false);
@@ -190,8 +192,7 @@ export default function LLMImpactAnalysis({ onVoltagesUpdated, onLoadingChanged,
     onLoadingChanged?.(true);
   
     try {
-      //submit job and get job id
-      const submitRes = await fetch(`${API_URL}/api/llm-impact`, {
+      const res = await fetch(`${API_URL}/api/llm-impact`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -204,29 +205,9 @@ export default function LLMImpactAnalysis({ onVoltagesUpdated, onLoadingChanged,
           sampleInterval:    1,
         }),
       });
-      if (!submitRes.ok) throw new Error(await submitRes.text() || `HTTP ${submitRes.status}`);
-      const { job_id } = await submitRes.json();
-  
-      // poll 
-      const result: AnalysisData = await new Promise((resolve, reject) => {
-        const interval = setInterval(async () => {
-          try {
-            const pollRes = await fetch(`${API_URL}/api/job/${job_id}`);
-            const job = await pollRes.json();
-            if (job.status === 'done') {
-              clearInterval(interval);
-              resolve(job.result);
-            } else if (job.status === 'error') {
-              clearInterval(interval);
-              reject(new Error(job.detail));
-            }
-            // still 'pending' → keep polling
-          } catch (e) {
-            clearInterval(interval);
-            reject(e);
-          }
-        }, 2000);
-      });
+      if (!res.ok) throw new Error(await res.text() || `HTTP ${res.status}`);
+      const result: AnalysisData = await res.json();
+      setSelIdx(0);   
   
       setData(result);
       if (result?.timeSeries?.length) {
@@ -240,16 +221,17 @@ export default function LLMImpactAnalysis({ onVoltagesUpdated, onLoadingChanged,
     } catch (e) {
       setError((e as Error).message);
     } finally {
-      setLoading(false); onLoadingChanged?.(false);
+      setLoading(false);
+      onLoadingChanged?.(false);
     }
   };
 
   const violStats = useMemo(() => {
     if (!data) return [];
-    const n = data.timeSeries.length;
+    const n = timeSeries.length;
     return Array.from({ length: 13 }, (_, i) => {
       const bus    = i + 1;
-      const vSeries = data.timeSeries.map(d => d.voltages?.[i] ?? 1.0);
+      const vSeries = timeSeries.map(d => d.voltages?.[i] ?? 1.0);
       const under  = vSeries.filter(v => v < 0.95).length;
       const over   = vSeries.filter(v => v > 1.05).length;
       return { bus, total: n, under, over,
@@ -263,7 +245,7 @@ export default function LLMImpactAnalysis({ onVoltagesUpdated, onLoadingChanged,
     if (!data) return [];
     return Array.from({ length: 13 }, (_, i) => {
       const bus    = i + 1;
-      const series = data.timeSeries.map((d, idx) => ({ t: d.time, v: d.voltages?.[i] ?? 1.0, _i: idx }));
+      const series = timeSeries.map((d, idx) => ({ t: d.time, v: d.voltages?.[i] ?? 1.0, _i: idx }));
       const voltages   = series.map(s => s.v);
       const violations = voltages.filter(v => v < 0.95 || v > 1.05).length;
       return { bus, series, minV: Math.min(...voltages), maxV: Math.max(...voltages), violations, isTarget: bus === targetBus };
@@ -273,7 +255,7 @@ export default function LLMImpactAnalysis({ onVoltagesUpdated, onLoadingChanged,
   // GPU power chart data (raw trace values)
   const powerChartData = useMemo(() => {
     if (!data) return [];
-    return data.timeSeries.map(d => ({ t: d.time, kw: d.gpu_power_raw_kW ?? d.gpu_power_kW }));
+    return timeSeries.map(d => ({ t: d.time, kw: d.gpu_power_raw_kW ?? d.gpu_power_kW }));
   }, [data]);
 
   return (
@@ -344,7 +326,7 @@ export default function LLMImpactAnalysis({ onVoltagesUpdated, onLoadingChanged,
 
           {/* Replicas */}
           <div id="replicas">
-            <div style={{ color: '#94a3b8', fontSize: 9, fontWeight: 800, marginBottom: 4 }}>Replicas) </div>
+            <div style={{ color: '#94a3b8', fontSize: 9, fontWeight: 800, marginBottom: 4 }}>Replicas </div>
             <div style={{ display: 'flex', alignItems: 'center', gap: 6, background: '#fff', border: '1px solid #cbd5e1', borderRadius: 6, padding: '6px 10px' }}>
               <Cpu size={14} color="#64748b" />
               <input type="number" min={1} max={500} value={numReplicas}
@@ -388,7 +370,6 @@ export default function LLMImpactAnalysis({ onVoltagesUpdated, onLoadingChanged,
 
       {data && !loading && (
         <div style={{ padding: '24px', display: 'flex', flexDirection: 'column', gap: 20 }}>
-          Using:
           {/* Trace info banner */}
           <div style={{ background: '#f5f3ff', border: '1px solid #c4b5fd', borderRadius: 8, padding: '10px 16px', display: 'flex', gap: 24, flexWrap: 'wrap', alignItems: 'center' }}>
             <div style={{ fontSize: 11, color: '#6d28d9' }}>Model: <strong>{data.modelLabel}</strong></div>
@@ -412,7 +393,7 @@ export default function LLMImpactAnalysis({ onVoltagesUpdated, onLoadingChanged,
               <button onClick={togglePlay} style={{ display: 'flex', alignItems: 'center', gap: 6, background: isPlaying ? '#0c4a6e' : '#0891b2', color: '#fff', border: 'none', borderRadius: 6, padding: '8px 20px', fontWeight: 800, fontSize: 13, cursor: 'pointer', minWidth: 110, justifyContent: 'center' }}>
                 {isPlaying ? <><Pause size={14} /> Pause</> : <><Play size={14} /> {atEnd ? 'Replay' : 'Play'}</>}
               </button>
-              <button onClick={() => { setIsPlaying(false); setSelIdx(i => Math.min(data.timeSeries.length - 1, i + 1)); }} disabled={atEnd}
+              <button onClick={() => { setIsPlaying(false); setSelIdx(i => Math.min(timeSeries.length - 1, i + 1)); }} disabled={atEnd}
                 style={{ display: 'flex', alignItems: 'center', gap: 4, cursor: atEnd ? 'not-allowed' : 'pointer', border: '1px solid #cbd5e1', background: '#fff', borderRadius: 6, padding: '6px 10px', fontSize: 11, fontWeight: 700, color: atEnd ? '#cbd5e1' : '#0f172a' }}>
                 NEXT <ChevronRight size={16} />
               </button>
@@ -431,9 +412,9 @@ export default function LLMImpactAnalysis({ onVoltagesUpdated, onLoadingChanged,
               </div>
             </div>
             <div style={{ position: 'relative', height: 4, background: '#e2e8f0', borderRadius: 2, marginBottom: 6 }}>
-              <div style={{ position: 'absolute', left: 0, top: 0, height: '100%', width: `${(selIdx / (data.timeSeries.length - 1)) * 100}%`, background: '#0891b2', borderRadius: 2, transition: 'width 0.15s' }} />
+              <div style={{ position: 'absolute', left: 0, top: 0, height: '100%', width: `${(selIdx / (timeSeries.length - 1)) * 100}%`, background: '#0891b2', borderRadius: 2, transition: 'width 0.15s' }} />
             </div>
-            <input type="range" min={0} max={data.timeSeries.length - 1} value={selIdx}
+            <input type="range" min={0} max={timeSeries.length - 1} value={selIdx}
               onChange={e => { setIsPlaying(false); setSelIdx(+e.target.value); }}
               style={{ width: '100%', height: 6, cursor: 'pointer', accentColor: '#0891b2' }} />
           </div>
@@ -446,7 +427,8 @@ export default function LLMImpactAnalysis({ onVoltagesUpdated, onLoadingChanged,
                 {data.modelLabel} · {data.maxNumSeqs} seqs · {data.numReplicas} replica{data.numReplicas > 1 ? 's' : ''}
               </div>
               <div style={{ height: 120 }}>
-                <ResponsiveContainer width="100%" height="100%">
+              <ResponsiveContainer width="100%" height="100%" minHeight={80}>
+
                   <LineChart data={powerChartData} margin={{ top: 4, right: 20, bottom: 4, left: 10 }}>
                     <XAxis dataKey="t" stroke="#94a3b8" tick={{ fontSize: 9 }} tickFormatter={v => `${v}s`} />
                     <YAxis stroke="#94a3b8" tick={{ fontSize: 9 }} tickFormatter={v => `${v.toFixed(0)}kW`} />
@@ -507,7 +489,8 @@ export default function LLMImpactAnalysis({ onVoltagesUpdated, onLoadingChanged,
               </div>
             </div>
             <div style={{ height: 220 }}>
-              <ResponsiveContainer width="100%" height="100%">
+            <ResponsiveContainer width="100%" height="100%" minHeight={80}>
+
                 <BarChart data={violStats} margin={{ top: 8, right: 20, bottom: 20, left: 10 }}>
                   <XAxis dataKey="bus" stroke="#64748b" tick={{ fontSize: 10 }} tickFormatter={v => `B${v}`}
                     label={{ value: 'Bus Number', position: 'insideBottom', offset: -12, fontSize: 10, fill: '#64748b' }} />
@@ -554,7 +537,8 @@ export default function LLMImpactAnalysis({ onVoltagesUpdated, onLoadingChanged,
                     </div>
                   </div>
                   <div style={{ height: 100 }}>
-                    <ResponsiveContainer width="100%" height="100%">
+                  <ResponsiveContainer width="100%" height="100%" minHeight={80}>
+
                       <LineChart data={bus.series} margin={{ top: 4, right: 4, bottom: 0, left: 0 }}
                         onClick={(e: any) => { const idx = e?.activePayload?.[0]?.payload?._i; if (idx != null) { setIsPlaying(false); setSelIdx(idx); } }}
 

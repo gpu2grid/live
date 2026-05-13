@@ -3,8 +3,8 @@ requires = ["setuptools>=64"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "openg2g"
-dynamic = ["version"]
+name = "bus-system-backend"
+version = "0.1.0"
 description = "A GPU-to-Grid simulation library for datacenter-grid cooperation."
 requires-python = ">=3.10"
 license = "Apache-2.0"
@@ -16,6 +16,8 @@ dependencies = [
     "aiohttp",
     "zeus>=0.15.0",
     "mlenergy-data",
+    "openg2g[opendss]",
+
 ]
 
 [project.urls]
@@ -38,11 +40,11 @@ dev = [
     {include-group = "examples"},
 ]
 
-[tool.setuptools.dynamic]
-version = {attr = "openg2g.__version__"}
-
 [tool.setuptools.packages.find]
-include = ["openg2g*"]
+where = ["."]
+include = ["your_project_name*"]
+exclude = ["data*", "outputs*", "scripts*", "tests*"]
+
 
 [tool.ruff]
 target-version = "py310"
