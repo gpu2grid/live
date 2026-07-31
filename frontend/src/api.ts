@@ -1,6 +1,7 @@
 // ── Central API config ─────────────────────────────────────────────────────────
 
-export const API_URL = "https://gpu2grid-live.hf.space";
+//export const API_URL = "https://gpu2grid-live.hf.space";
+export const API_URL = "http://localhost:8080";
 
 
 

@@ -1,212 +1,212 @@
-import sys
-import numpy as np
-import matplotlib
-matplotlib.use('Agg')
-import matplotlib.pyplot as plt
-import matplotlib.image as mpimg
-import matplotlib.patches as mpatches
-from matplotlib.lines import Line2D
-import matplotlib.cm as cm
-import matplotlib.colors as mcolors
-import logging
-logger = logging.getLogger(__name__)
+"""
+generate_heatmap.py  v2
+-----------------------
+Pure-SVG topology heatmap. No matplotlib.
+Coords arrive already scaled to pixel space from topology_coords.py.
+"""
+
+from __future__ import annotations
+import xml.etree.ElementTree as ET
+import math
 
 
-
-BUS_NAMES = {
-    1:'650', 2:'632', 3:'633', 4:'645', 5:'646', 6:'671',
-    7:'684', 8:'611', 9:'634', 10:'675', 11:'652', 12:'680', 13:'692',
-}
-
-BUS_COORDS = {
-    1:  (500, 650),  
-    2:  (500, 480),   
-    3:  (680, 480),   
-    9:  (860, 480),
-    4:  (320, 480), 
-    5:  (140, 480),  
-    6:  (500, 280),   
-    13: (680, 280),   
-    10: (860, 280), 
-    7:  (320, 280),   
-    8:  (140, 280), 
-    11: (320, 120),   
-    12: (500, 120),  
-}
+def _voltage_color(v: float) -> str:
+    if v >= 1.05:   return "#22c55e"
+    elif v >= 1.00: return "#4ade80"
+    elif v >= 0.97: return "#facc15"
+    elif v >= 0.95: return "#fb923c"
+    else:           return "#ef4444"
 
 
-LINES = [
-    (1,  2,  '650-632'),
-    (2,  4,  '632-645'),
-    (4,  5,  '645-646'),
-    (2,  3,  '632-633'),
-    (3,  9,  '633-634'),
-    (2,  6,  '632-671'),
-    (6,  13, '671-692'),
-    (13, 10, '692-675'),
-    (6,  7,  '671-684'),
-    (7,  8,  '684-611'),
-    (7,  11, '684-652'),
-    (6,  12, '671-680'),
-]
-
-TRANSFORMER_LINES = set()
+def _sizes(num_buses: int) -> dict:
+    if num_buses > 100:
+        return dict(r=5,  lw=1.2, fs=8,  fs_edge=6,  label_offset=14)
+    elif num_buses > 34:
+        return dict(r=7,  lw=1.8, fs=10, fs_edge=8,  label_offset=18)
+    else:
+        return dict(r=9,  lw=2.2, fs=11, fs_edge=9,  label_offset=20)
 
 
-def generate_heatmap(voltages, output_path, vmin=0.92, vmax=1.06, map_image="13busmap.png", dc_bus_idx=None):
+def generate_heatmap(
+    voltages:       list[float],
+    bus_names:      list[str],
+    coords:         dict,
+    lines:          list,
+    output_path:    str,
+    canvas_w:       int  = 900,
+    canvas_h:       int  = 750,
+    dc_bus:         str | None = None,
+    substation_bus: str        = "650",
+    topology:       str        = "ieee13",
+):
+    # ── 1. Build lookups ──────────────────────────────────────────────────────
+    coords_lc = {str(k).lower().strip(): v for k, v in coords.items()}
 
-    xs = np.array([BUS_COORDS[i][0] for i in range(1, 14)])
-    ys = np.array([BUS_COORDS[i][1] for i in range(1, 14)])
-    zs = np.array(voltages)
+    name_to_v:   dict[str, float]          = {}
+    name_to_pos: dict[str, tuple[int,int]] = {}
+    for i, name in enumerate(bus_names):
+        key = str(name).lower().strip()
+        name_to_v[key]   = voltages[i] if i < len(voltages) else 1.0
+        if key in coords_lc:
+            name_to_pos[key] = coords_lc[key]
 
-    xmin_d, xmax_d = -10, 1005
-    ymin_d, ymax_d = -10, 705
+    # ── 2. Virtual regulator coord patch (IEEE-13: rg60 between 650 and 632) ─
+    if "650" in coords_lc and "rg60" not in coords_lc and "632" in coords_lc:
+        x0, y0 = coords_lc["650"]
+        x1, y1 = coords_lc["632"]
+        coords_lc["rg60"] = (int(x0 + 0.3*(x1-x0)), int(y0 + 0.3*(y1-y0)))
 
+    sz  = _sizes(len(bus_names))
+    r   = sz["r"]
+    lw  = sz["lw"]
+    fs  = sz["fs"]
+    fse = sz["fs_edge"]
+    loff = sz["label_offset"]
 
+    # Skip edge labels for dense topologies
+    skip_edge_labels = len(bus_names) > 50
 
-  
+    # ── 3. SVG root ───────────────────────────────────────────────────────────
+    svg = ET.Element("svg", {
+        "xmlns":   "http://www.w3.org/2000/svg",
+        "width":   str(canvas_w),
+        "height":  str(canvas_h),
+        "viewBox": f"0 0 {canvas_w} {canvas_h}",
+    })
+    ET.SubElement(svg, "rect", {
+        "width": str(canvas_w), "height": str(canvas_h), "fill": "#f8fafc",
+    })
 
-    fig, ax = plt.subplots(figsize=(12, 8), frameon=False)
-    ax.set_xlim(xmin_d, xmax_d)
-    ax.set_ylim(ymin_d, ymax_d)
-    ax.set_aspect('equal')
-    ax.set_axis_off()
+    # ── 4. Lines ──────────────────────────────────────────────────────────────
+    for entry in lines:
+        b1 = str(entry[0]).split(".")[0].lower().strip()
+        b2 = str(entry[1]).split(".")[0].lower().strip()
+        label = str(entry[2]) if len(entry) > 2 else ""
 
-    # heatmap
+        # Skip open-point switches (bus names ending in _open or _open.N)
+        if "_open" in b1 or "_open" in b2:
+            continue
 
-   
-    try:
-        img = mpimg.imread(map_image)
-        ax.imshow(img[::-1], origin='lower', alpha=0.12, zorder=3,
-                  extent=[0, 1005, 0, 705])
-    except FileNotFoundError:
-        pass
+        p1 = coords_lc.get(b1)
+        p2 = coords_lc.get(b2)
+        if p1 is None and p2 is None:
+            continue
+        if p1 is None: p1 = p2
+        if p2 is None: p2 = p1
+        x1c, y1c = p1
+        x2c, y2c = p2
+        if x1c == x2c and y1c == y2c:
+            continue
 
-    for (bus_a, bus_b, label) in LINES:
-        x1, y1 = BUS_COORDS[bus_a]
-        x2, y2 = BUS_COORDS[bus_b]
-        is_xfmr = label in TRANSFORMER_LINES
-        ls = '--' if is_xfmr else '-'
+        # Halo + core line
+        ET.SubElement(svg, "line", {
+            "x1": str(x1c), "y1": str(y1c), "x2": str(x2c), "y2": str(y2c),
+            "stroke": "white", "stroke-width": str(lw * 2.8),
+            "stroke-linecap": "round",
+        })
+        ET.SubElement(svg, "line", {
+            "x1": str(x1c), "y1": str(y1c), "x2": str(x2c), "y2": str(y2c),
+            "stroke": "#1e293b", "stroke-width": str(lw),
+            "stroke-linecap": "round",
+        })
 
-        ax.plot([x1, x2], [y1, y2],
-                color='white', linewidth=7,
-                solid_capstyle='round', zorder=4)
+        # Edge label — only for sparse topologies, placed along line
+        if not skip_edge_labels and label:
+            mx, my = (x1c + x2c) // 2, (y1c + y2c) // 2
+            tw = len(label) * fse * 0.58
+            th = fse + 2
+            ET.SubElement(svg, "rect", {
+                "x": str(mx - tw/2 - 2), "y": str(my - th/2 - 1),
+                "width": str(tw + 4), "height": str(th + 2),
+                "rx": "2", "fill": "white", "opacity": "0.9",
+                "stroke": "#cbd5e1", "stroke-width": "0.6",
+            })
+            t = ET.SubElement(svg, "text", {
+                "x": str(mx), "y": str(my + fse*0.35),
+                "text-anchor": "middle", "font-size": str(fse),
+                "font-family": "monospace", "fill": "#64748b",
+            })
+            t.text = label
 
-        ax.plot([x1, x2], [y1, y2],
-                color='#1e293b', linewidth=3,
-                linestyle=ls, solid_capstyle='round', zorder=5)
+    # ── 5. Nodes ──────────────────────────────────────────────────────────────
+    # Collect all positions to detect overlapping labels
+    placed_labels: list[tuple[float,float,float,float]] = []  # (x,y,w,h) bboxes
 
-        mx, my = (x1 + x2) / 2, (y1 + y2) / 2
-        ax.text(mx, my, label, fontsize=5.5, color='#334155',
-                ha='center', va='center', zorder=6,
-                bbox=dict(fc='white', alpha=0.8, ec='#cbd5e1', pad=1.5))
+    def _overlaps(x: float, y: float, w: float, h: float) -> bool:
+        for bx, by, bw, bh in placed_labels:
+            if abs(x - bx) < (w + bw)/2 + 2 and abs(y - by) < (h + bh)/2 + 2:
+                return True
+        return False
 
-    # bus nodes on map
-    for bus_id, (bx, by) in BUS_COORDS.items():
-        v = voltages[bus_id - 1]
+    for i, name in enumerate(bus_names):
+        key = str(name).lower().strip()
+        if key not in name_to_pos:
+            continue
 
-        # violation outliens
-        if v < 0.95:
-            ax.scatter(bx, by, s=500, color='#ef4444', alpha=0.35, zorder=7)
-        elif v > 1.05:
-            ax.scatter(bx, by, s=500, color='#f59e0b', alpha=0.35, zorder=7)
+        px, py   = name_to_pos[key]
+        v        = name_to_v.get(key, 1.0)
+        color    = _voltage_color(v)
+        is_sub   = key == str(substation_bus).lower().strip()
+        is_dc    = dc_bus is not None and key == str(dc_bus).lower().strip()
 
-        #fill color
-        t = np.clip((v - vmin) / (vmax - vmin), 0, 1)
-        bus_color = plt.cm.RdYlGn(t)
+        # DC bus highlight ring
+        if is_dc:
+            ET.SubElement(svg, "circle", {
+                "cx": str(px), "cy": str(py), "r": str(r + 5),
+                "fill": "none", "stroke": "#7c3aed", "stroke-width": "2",
+                "stroke-dasharray": "4 2",
+            })
 
-        marker = 's' if bus_id == 1 else 'o'
-        path_collection = ax.scatter(bx, by, s=200, color=bus_color,
-                                 marker=marker, edgecolors='#1e293b',
-                                 linewidths=2, zorder=8)
-        path_collection.set_gid(f"bus-node-{bus_id}")
-   
-        v_color = '#dc2626' if v < 0.95 else '#d97706' if v > 1.05 else '#166534'
-        ax.text(bx, by + 30, f'Bus {bus_id}',
-                fontsize=7.5, fontweight='bold', color='#1e293b',
-                ha='center', va='bottom', zorder=9,
-                bbox=dict(fc='white', alpha=0.8, ec='none', pad=1.5))
-        ax.text(bx, by - 30, f'{v:.3f} p.u.',
-                fontsize=7.5, fontweight='bold', color=v_color,
-                ha='center', va='top', zorder=9,
-                bbox=dict(fc='white', alpha=0.8, ec='none', pad=1.5))
+        # Node shape
+        if is_sub:
+            ET.SubElement(svg, "rect", {
+                "x": str(px - r), "y": str(py - r),
+                "width": str(r*2), "height": str(r*2),
+                "fill": color, "stroke": "#0f172a", "stroke-width": "1.8",
+            })
+        else:
+            ET.SubElement(svg, "circle", {
+                "cx": str(px), "cy": str(py), "r": str(r),
+                "fill": color, "stroke": "#0f172a", "stroke-width": "1.4",
+            })
 
-    #data center marker
-    if dc_bus_idx is not None and dc_bus_idx in BUS_COORDS:
-        dcx, dcy = BUS_COORDS[dc_bus_idx]
-        
-        ax.scatter(dcx, dcy, s=700, color='none',
-                   edgecolors='#0891b2', linewidths=3, zorder=10)
-        ax.scatter(dcx, dcy, s=900, color='none',
-                   edgecolors='#0891b2', linewidths=1, alpha=0.4, zorder=10)
-        ax.annotate(
-            'DATA CENTER',
-            xy=(dcx, dcy), xytext=(dcx, dcy + 65),
-            fontsize=8, fontweight='bold', color='#0891b2',
-            ha='center', va='bottom', zorder=11,
-            bbox=dict(boxstyle='round,pad=0.3', fc='#ecfeff', ec='#0891b2', lw=1.5),
-            arrowprops=dict(arrowstyle='->', color='#0891b2', lw=1.5),
-        )
+        # Label — try above first, fall back to below if overlapping
+        label_text = f"{name}  {v:.3f} p.u."
+        tw = len(label_text) * fs * 0.60
+        th = fs + 2
 
-    norm = mcolors.Normalize(vmin=vmin, vmax=vmax)
-    sm = plt.cm.ScalarMappable(cmap='RdYlGn', norm=norm)
-    sm.set_array([])
-    
-    
-    cbar = fig.colorbar(sm, ax=ax, shrink=0.6, pad=0.02, aspect=25)
-    cbar.set_label('Voltage (p.u.)', fontsize=10, labelpad=8)
-    cbar.ax.tick_params(labelsize=8)
-    
-    
-    cbar.ax.axhline(y=(0.95 - vmin) / (vmax - vmin), color='#ef4444', linewidth=1.5, linestyle='--')
-    cbar.ax.axhline(y=(1.05 - vmin) / (vmax - vmin), color='#f59e0b', linewidth=1.5, linestyle='--')
-    
-    ax.set_facecolor('white')
-    fig.patch.set_facecolor('white')
-   
+        # Candidate positions: above, below, right, left
+        candidates = [
+            (px,          py - r - loff),      # above (preferred)
+            (px,          py + r + loff + 2),  # below
+            (px + r + tw/2 + 4, py),           # right
+            (px - r - tw/2 - 4, py),           # left
+        ]
+        tx, ty = candidates[0]   # default: above
+        for cx, cy in candidates:
+            if not _overlaps(cx, cy, tw, th):
+                tx, ty = cx, cy
+                break
 
+        placed_labels.append((tx, ty, tw, th))
 
+        # White backing rect
+        ET.SubElement(svg, "rect", {
+            "x": str(tx - tw/2 - 2), "y": str(ty - th/2 - 1),
+            "width": str(tw + 4), "height": str(th + 2),
+            "rx": "2", "fill": "white", "opacity": "0.88",
+        })
+        ET.SubElement(svg, "text", {
+            "x": str(tx), "y": str(ty + fs*0.35),
+            "text-anchor": "middle",
+            "font-size": str(fs),
+            "font-family": "Arial, sans-serif",
+            "font-weight": "bold" if is_sub else "normal",
+            "fill": "#0f172a",
+        }).text = label_text
 
-    legend_elements = [
-        Line2D([0],[0], marker='o', color='w', markerfacecolor='none',
-               markersize=12, markeredgecolor='#0891b2', markeredgewidth=2.5,
-               label='Data center bus'),
- 
-        mpatches.Patch(color='#ef4444', alpha=0.5, label='Under-voltage  < 0.95 p.u.'),
-        mpatches.Patch(color='#f59e0b', alpha=0.5, label='Over-voltage   > 1.05 p.u.'),
-        Line2D([0],[0], marker='s', color='w', markerfacecolor='#6b7280',
-               markersize=9, markeredgecolor='#1e293b', label='Substation (Bus 1 = 650)'),
-        Line2D([0],[0], marker='o', color='w', markerfacecolor='#6b7280',
-               markersize=9, markeredgecolor='#1e293b', label='Load bus'),
-
-
-
-        mpatches.Patch(color='none', label=' '),
-        mpatches.Patch(color='none', label='Bus index:'),
-        mpatches.Patch(color='none', label='1=650  2=632  3=633'),
-        mpatches.Patch(color='none', label='4=645  5=646  6=671'),
-        mpatches.Patch(color='none', label='7=684  8=611  9=634'),
-        mpatches.Patch(color='none', label='10=675 11=652 12=680'),
-        
-        mpatches.Patch(color='none', label='13=692'),
-    ]
-    ax.legend(handles=legend_elements, loc='lower right',
-              fontsize=6.5, framealpha=0.92, edgecolor='#cbd5e1',
-              handlelength=1.5, handleheight=1.0)
-
-    plt.tight_layout(pad=0.3)
-    plt.rcParams['svg.fonttype'] = 'none'
-    plt.savefig(output_path, format='svg', bbox_inches='tight', dpi=150, facecolor='white')
-    plt.close()
-    logger.info(f"Saved heatmap: {output_path}")
-
-
-if __name__ == "__main__":
-    if len(sys.argv) < 15:
-        logger.info(f"Usage: generate_heatmap.py <output.png> <v1> <v2> ... <v13> [dc_bus_idx]")
- 
-        sys.exit(1)
-    out      = sys.argv[1]
-    volts    = [float(v) for v in sys.argv[2:15]]
-    dc_bus   = int(sys.argv[15]) if len(sys.argv) > 15 else None
-    generate_heatmap(volts, out, dc_bus_idx=dc_bus)
+    # ── 6. Write ──────────────────────────────────────────────────────────────
+    tree = ET.ElementTree(svg)
+    ET.indent(tree, space="  ")
+    tree.write(output_path, encoding="unicode", xml_declaration=False)
+    print(f"[{topology}] SVG written → {output_path}  ({len(bus_names)} buses)")
