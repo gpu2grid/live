@@ -34,7 +34,7 @@ export const CollapsibleCard: React.FC<CollapsibleCardProps> = ({
         style={{
           display: 'flex',
           alignItems: 'center',
-          justify: 'space-between',
+          justifyContent: 'space-between',
           padding: '12px 16px',
           backgroundColor: '#f8fafc',
           cursor: 'pointer',

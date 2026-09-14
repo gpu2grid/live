@@ -1,5 +1,5 @@
 import React, { useState, useMemo, useEffect, useCallback } from 'react';
-import Papa from 'papaparse';
+import Papa, { ParseResult } from 'papaparse';
 import {
   LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, ReferenceLine, Legend,
 } from 'recharts';
@@ -63,54 +63,76 @@ function defaultCsvPath(topology: Topology, kind: RunKind, basePath: string): st
   return `${basePath}/outputs/${topology}/${runFolder}/${fileName}`;
 }
 
+function buildParsedRun(
+  result: ParseResult<Record<string, string>>,
+  fileNameFallback: string,
+): ParsedRun {
+  const fields = (result.meta.fields ?? []) as string[];
+  const timeField = fields.find(f => /(^|_)time_s$/i.test(f)) ?? fields[0];
 
+  const buses: string[] = [];
+  for (const f of fields) {
+    const m = f.match(/^(.+)_min$/);
+    if (m && !buses.includes(m[1])) buses.push(m[1]);
+  }
+  if (!buses.length) {
+    throw new Error('No "*_min" bus columns found in this CSV — check the export snippet.');
+  }
+
+  const seriesByBus: Record<string, SeriesPoint[]> = {};
+  buses.forEach(b => { seriesByBus[b] = []; });
+
+  const rows = result.data as Record<string, string>[];
+  let maxT = 0;
+  for (const row of rows) {
+    const t = parseFloat(row[timeField]);
+    if (!isFinite(t)) continue;
+    if (t > maxT) maxT = t;
+    for (const b of buses) {
+      const raw = row[`${b}_min`];
+      const v = raw === undefined || raw === '' ? null : parseFloat(raw);
+      seriesByBus[b].push({ t, v: (v != null && isFinite(v)) ? v : null });
+    }
+  }
+
+  return { fileName: fileNameFallback, buses, seriesByBus, rowCount: rows.length, durationS: maxT };
+}
 
 function parseCsvSource(source: File | string): Promise<ParsedRun> {
   return new Promise((resolve, reject) => {
     const isUrl = typeof source === 'string';
-    Papa.parse(source as any, {
-      header: true,
-      skipEmptyLines: true,
-      download: isUrl,
-      complete: (result) => {
-        try {
-          const fields = (result.meta.fields ?? []) as string[];
-          const timeField = fields.find(f => /(^|_)time_s$/i.test(f)) ?? fields[0];
 
-          const buses: string[] = [];
-          for (const f of fields) {
-            const m = f.match(/^(.+)_min$/);
-            if (m && !buses.includes(m[1])) buses.push(m[1]);
+    if (isUrl) {
+      const url = source;
+      Papa.parse(url, {
+        header: true,
+        skipEmptyLines: true,
+        download: true,
+        complete: (result: ParseResult<Record<string, string>>) => {
+          try {
+            const fileName = url.split('/').pop() ?? url;
+            resolve(buildParsedRun(result, fileName));
+          } catch (e) {
+            reject(e as Error);
           }
-          if (!buses.length) {
-            reject(new Error('No "*_min" bus columns found in this CSV — check the export snippet.'));
-            return;
+        },
+        error: (err: unknown) => reject(err instanceof Error ? err : new Error(String(err))),
+      });
+    } else {
+      const file = source;
+      Papa.parse<Record<string, string>>(file, {
+        header: true,
+        skipEmptyLines: true,
+        complete: (result: ParseResult<Record<string, string>>) => {
+          try {
+            resolve(buildParsedRun(result, file.name));
+          } catch (e) {
+            reject(e as Error);
           }
-
-          const seriesByBus: Record<string, SeriesPoint[]> = {};
-          buses.forEach(b => { seriesByBus[b] = []; });
-
-          const rows = result.data as Record<string, string>[];
-          let maxT = 0;
-          for (const row of rows) {
-            const t = parseFloat(row[timeField]);
-            if (!isFinite(t)) continue;
-            if (t > maxT) maxT = t;
-            for (const b of buses) {
-              const raw = row[`${b}_min`];
-              const v = raw === undefined || raw === '' ? null : parseFloat(raw);
-              seriesByBus[b].push({ t, v: (v != null && isFinite(v)) ? v : null });
-            }
-          }
-
-          const fileName = isUrl ? (source as string).split('/').pop() ?? (source as string) : (source as File).name;
-          resolve({ fileName: fileName!, buses, seriesByBus, rowCount: rows.length, durationS: maxT });
-        } catch (e) {
-          reject(e as Error);
-        }
-      },
-      error: (err: any) => reject(err instanceof Error ? err : new Error(String(err))),
-    });
+        },
+        error: (err: unknown) => reject(err instanceof Error ? err : new Error(String(err))),
+      });
+    }
   });
 }
 
