@@ -36,6 +36,10 @@ const TOPO_LABEL: Record<Topology, string> = {
   ieee13:'IEEE 13-Bus', ieee34:'IEEE 34-Bus', ieee123:'IEEE 123-Bus',
 };
 
+// The backend sends IEEE13 voltages in this fixed order (index i -> bus with IEEE13_BUS_INDEX = i+1).
+const IEEE13_ORDER: string[] = Object.entries(IEEE13_BUS_INDEX)
+  .sort((a, b) => a[1] - b[1]).map(([k]) => k);
+
 const VMIN = 0.92, VMAX = 1.06;
 
 function rdYlGn(t: number): string {
@@ -147,11 +151,12 @@ export default function VoltageHeatmap({
     const scaled=scaleCoords(topoData.coords,w,h);
 
     const vMap:Record<string,number>={};
-    const names=busNames??Object.keys(scaled);
+    const names = topology==='ieee13' ? IEEE13_ORDER : (busNames??Object.keys(scaled));
     names.forEach((n,i)=>{vMap[n.toLowerCase()]=voltages[i]??1.0;});
 
     let dcKey:string|null=null;
     if (dataCenterBusName) dcKey=dataCenterBusName.toLowerCase();
+    else if (dataCenterBus && topology==='ieee13') dcKey = IEEE13_ORDER[dataCenterBus-1] ?? null;
     else if (dataCenterBus&&busNames) dcKey=busNames[dataCenterBus-1]?.toLowerCase()??null;
     const subKey=names.find(n=>scaled[n.toLowerCase()])?.toLowerCase()??'';
 
@@ -328,7 +333,7 @@ export default function VoltageHeatmap({
             const under=nd.voltage<0.95,over=nd.voltage>1.05;
             const isHov=hovered===nd.name;
             const vtxt=`${nd.voltage.toFixed(3)} p.u.`;
-            const scaledNr=nr/zoom, scaledFs=fs/zoom, scaledFsV=(fs-1)/zoom;
+            const scaledNr=(nd.isDC ? nr*1.4 : nr)/zoom, scaledFs=fs/zoom, scaledFsV=(fs-1)/zoom;
             const nameTw=nd.displayName.length*scaledFs*0.62;
             const vtxtTw=vtxt.length*scaledFsV*0.58;
 
@@ -344,13 +349,26 @@ export default function VoltageHeatmap({
                   <circle cx={nd.x} cy={nd.y} r={scaledNr+7/zoom}
                     fill="#f59e0b22" stroke="#f59e0b" strokeWidth={1.5/zoom}/>
                 )}
-                {nd.isDC&&(<>
-                  <circle cx={nd.x} cy={nd.y} r={scaledNr+10/zoom}
-                    fill="none" stroke="#0891b2" strokeWidth={2.5/zoom}/>
-                  <circle cx={nd.x} cy={nd.y} r={scaledNr+14/zoom}
-                    fill="none" stroke="#0891b2" strokeWidth={1/zoom} opacity={0.4}/>
-                </>)}
-                {nd.isSubstation?(
+                {nd.isDC&&(
+                  <circle cx={nd.x} cy={nd.y} r={scaledNr*1.5+4/zoom}
+                    fill="#0891b218" stroke="#0891b2" strokeWidth={1.5/zoom}
+                    strokeDasharray={`${4/zoom} ${3/zoom}`}/>
+                )}
+                {nd.isDC ? (() => {
+                  const s = scaledNr*2, x0 = nd.x - s/2, y0 = nd.y - s/2;
+                  const st = under ? '#ef4444' : over ? '#f59e0b' : '#22c55e';
+                  return (
+                    <g>
+                      <rect x={x0} y={y0} width={s} height={s} rx={3/zoom} fill="#0f172a" stroke={st} strokeWidth={2.6/zoom}/>
+                      {[0,1,2].map(k=>(
+                        <g key={k}>
+                          <rect x={x0+s*0.16} y={y0+s*(0.16+k*0.27)} width={s*0.68} height={s*0.17} rx={1/zoom} fill="#475569"/>
+                          <circle cx={x0+s*0.76} cy={y0+s*(0.16+k*0.27)+s*0.085} r={s*0.05} fill="#22c55e"/>
+                        </g>
+                      ))}
+                    </g>
+                  );
+                })() : nd.isSubstation?(
                   <rect x={nd.x-scaledNr} y={nd.y-scaledNr}
                     width={scaledNr*2} height={scaledNr*2}
                     fill={col} stroke="#1e293b" strokeWidth={2/zoom}/>
@@ -422,7 +440,9 @@ export default function VoltageHeatmap({
           return (<>
             <rect x={lx} y={ly} width={lw2} height={lh}
               fill="white" stroke="#e2e8f0" strokeWidth={0.8} rx={4} opacity={0.96}/>
-            <circle cx={lx+13} cy={ly+12} r={5} fill="none" stroke="#0891b2" strokeWidth={2}/>
+            <rect x={lx+7} y={ly+6} width={12} height={12} rx={2} fill="#0f172a" stroke="#22c55e" strokeWidth={1.6}/>
+            <rect x={lx+9} y={ly+9} width={6} height={2} fill="#64748b"/>
+            <rect x={lx+9} y={ly+13} width={6} height={2} fill="#64748b"/>
             <text x={lx+24} y={ly+16} fontSize={8} fontFamily="Inter,Arial,sans-serif" fill="#1e293b">Data center bus</text>
             <circle cx={lx+13} cy={ly+28} r={5} fill="#ef444433" stroke="#ef4444" strokeWidth={1.2}/>
             <text x={lx+24} y={ly+32} fontSize={8} fontFamily="Inter,Arial,sans-serif" fill="#1e293b">Under-voltage &lt; 0.95 p.u.</text>

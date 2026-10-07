@@ -2,7 +2,7 @@
 generate_heatmap.py  v2
 -----------------------
 Pure-SVG topology heatmap. No matplotlib.
-Coords arrive already scaled to pixel space from topology_coords.py.
+Coor_s arrive already scaled to pixel space from topology_coords.py.
 """
 
 from __future__ import annotations
@@ -151,24 +151,26 @@ def generate_heatmap(
 
         # DC bus highlight ring
         if is_dc:
-            ET.SubElement(svg, "circle", {
-                "cx": str(px), "cy": str(py), "r": str(r + 5),
-                "fill": "none", "stroke": "#7c3aed", "stroke-width": "2",
-                "stroke-dasharray": "4 2",
-            })
-
-        # Node shape
-        if is_sub:
+            s = r * 3.2
+            x0, y0 = px - s / 2, py - s / 2
             ET.SubElement(svg, "rect", {
-                "x": str(px - r), "y": str(py - r),
-                "width": str(r*2), "height": str(r*2),
-                "fill": color, "stroke": "#0f172a", "stroke-width": "1.8",
+                "x": str(x0), "y": str(y0), "width": str(s), "height": str(s), "rx": "3",
+                "fill": "#0f172a", "stroke": color, "stroke-width": "2.6",   # border = voltage status
             })
+            for k in range(3):   # three server-rack units with status LEDs
+                yy = y0 + s * 0.18 + k * s * 0.27
+                ET.SubElement(svg, "rect", {"x": str(x0 + s * 0.16), "y": str(yy),
+                    "width": str(s * 0.68), "height": str(s * 0.16), "rx": "1", "fill": "#475569"})
+                ET.SubElement(svg, "circle", {"cx": str(x0 + s * 0.74), "cy": str(yy + s * 0.08),
+                    "r": str(s * 0.045), "fill": "#22c55e"})
+        elif is_sub:
+            ET.SubElement(svg, "rect", {
+                "x": str(px - r), "y": str(py - r), "width": str(r * 2), "height": str(r * 2),
+                "fill": color, "stroke": "#0f172a", "stroke-width": "1.8"})
         else:
             ET.SubElement(svg, "circle", {
                 "cx": str(px), "cy": str(py), "r": str(r),
-                "fill": color, "stroke": "#0f172a", "stroke-width": "1.4",
-            })
+                "fill": color, "stroke": "#0f172a", "stroke-width": "1.4"})
 
         # Label — try above first, fall back to below if overlapping
         label_text = f"{name}  {v:.3f} p.u."
