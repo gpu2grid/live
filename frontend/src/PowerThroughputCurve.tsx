@@ -121,7 +121,7 @@ export default function PowerThroughputCurve({
       // batch sequence this run went through, e.g. 128 → 256 → 512
       const seq: number[] = [];
       ts.forEach(s => { const b = s.batch_by_model?.[modelLabel] ?? firstVal(s.batch_by_model); if (b != null && seq[seq.length - 1] !== b) seq.push(b); });
-      return { mode: m, name: MODE_NAME[m], ...pt, runBatch: batch, seq };
+      return {  ...pt, mode: m, name: MODE_NAME[m],runBatch: batch, seq };
     }).filter(Boolean) as any[];
   }, [runs, main, snapTime, modelLabel]);
 
